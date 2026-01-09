@@ -1,0 +1,35 @@
+# Python
+.venv
+.Python
+ENV/
+__pycache__/
+*.py[cod]
+*.so
+*$py.class
+env/
+venv/
+
+# Environment
+.env
+.env.local
+
+# Site configuration (contains personal data)
+sites.json
+
+# IDE
+.idea/
+.vscode/
+*.swo
+*.swp
+
+# Database
+*.db
+*.sqlite
+
+# OS
+.DS_Store
+Thumbs.db
+
+# TLS Certificates (keep .gitkeep)
+certs/*.crt
+certs/*.key

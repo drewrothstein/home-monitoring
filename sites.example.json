@@ -1,0 +1,49 @@
+{
+  "sites": {
+    "MinimalSite": {
+      "capacity_kw": 10.0,
+      "location": {
+        "latitude": 40.7128,
+        "longitude": -74.0060
+      }
+    },
+    "FullSite": {
+      "capacity_kw": 15.0,
+      "timezone": "America/Los_Angeles",
+      "tempest": {
+        "station_id": 12345
+      },
+      "openweather": {
+        "latitude": 34.0522,
+        "longitude": -118.2437
+      },
+      "enphase": {
+        "site_id": 1234567
+      },
+      "enphase_local": {
+        "gateways": [
+          {
+            "serial": "123456789012",
+            "host": "192.168.1.100"
+          }
+        ]
+      },
+      "tesla": {
+        "site_ids": ["your_tesla_site_id_1", "your_tesla_site_id_2"]
+      },
+      "flume": {
+        "device_id": "your_flume_device_id_here"
+      },
+      "rachio": {
+        "device_id": "your_rachio_device_id_here"
+      },
+      "tankutility": {
+        "device_id": "your_tank_utility_device_id_here"
+      },
+      "iaqualink": {
+        "serial_number": "your_pool_controller_serial",
+        "device_name": "Pool Controller"
+      }
+    }
+  }
+}

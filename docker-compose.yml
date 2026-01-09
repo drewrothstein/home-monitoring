@@ -1,0 +1,77 @@
+# Local development configuration
+# For remote/production deployment, use: docker-compose -f docker-compose.prod.yml
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: home-monitor-db
+    environment:
+      POSTGRES_USER: home_monitor
+      POSTGRES_PASSWORD: home_monitor_password
+      POSTGRES_DB: home_monitor
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U home_monitor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  fetcher:
+    profiles:
+      - manual
+    build: .
+    container_name: home-monitor-fetcher
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://home_monitor:home_monitor_password@postgres:5432/home_monitor
+    volumes:
+      - .:/app  # Live code reloading for local development
+      - ./sites.json:/app/sites.json:ro
+    command: python -m home_monitor.fetcher
+
+  fetcher-scheduled:
+    profiles:
+      - scheduled
+    build: .
+    container_name: home-monitor-fetcher-scheduled
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://home_monitor:home_monitor_password@postgres:5432/home_monitor
+      FETCHER_INTERVAL_MINUTES: 5
+    volumes:
+      - .:/app  # Live code reloading for local development
+      - ./sites.json:/app/sites.json:ro
+    command: python -m home_monitor.scheduler
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: home-monitor-grafana
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  grafana_data:

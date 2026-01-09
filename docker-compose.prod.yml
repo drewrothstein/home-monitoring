@@ -1,0 +1,82 @@
+# Production/remote deployment configuration
+# Used with: docker-compose -f docker-compose.prod.yml up -d
+# For local development, use: docker-compose up -d (uses docker-compose.yml)
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: home-monitor-db
+    environment:
+      POSTGRES_USER: home_monitor
+      POSTGRES_PASSWORD: home_monitor_password
+      POSTGRES_DB: home_monitor
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U home_monitor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  fetcher:
+    profiles:
+      - manual
+    build: .
+    container_name: home-monitor-fetcher
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://home_monitor:home_monitor_password@postgres:5432/home_monitor
+    volumes:
+      - ./sites.json:/app/sites.json:ro
+    command: python -m home_monitor.fetcher
+
+  fetcher-scheduled:
+    profiles:
+      - scheduled
+    build: .
+    container_name: home-monitor-fetcher-scheduled
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://home_monitor:home_monitor_password@postgres:5432/home_monitor
+      FETCHER_INTERVAL_MINUTES: 5
+    volumes:
+      - ./sites.json:/app/sites.json:ro
+    command: python -m home_monitor.scheduler
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: home-monitor-grafana
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=
+      # HTTPS configuration - set GF_SERVER_PROTOCOL=https in .env to enable
+      - GF_SERVER_CERT_FILE=/etc/grafana/certs/grafana.crt
+      - GF_SERVER_CERT_KEY=/etc/grafana/certs/grafana.key
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./certs:/etc/grafana/certs:ro
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  grafana_data:

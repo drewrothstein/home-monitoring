@@ -1,0 +1,19 @@
+apiVersion: 1
+
+datasources:
+  - name: Home Monitor PostgreSQL
+    type: postgres
+    access: proxy
+    url: postgres:5432
+    database: home_monitor
+    user: home_monitor
+    secureJsonData:
+      password: home_monitor_password
+    jsonData:
+      database: home_monitor
+      sslmode: disable
+      maxOpenConns: 100
+      maxIdleConns: 100
+      connMaxLifetime: 14400
+    isDefault: true
+    editable: true
