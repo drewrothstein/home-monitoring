@@ -17,7 +17,7 @@ DEPLOY_CONTEXT ?= home-monitor-pi
 DEPLOY_CONFIG_PATH ?= /home/pi/home-monitor
 
 # Compose file for remote deployment (standalone production config)
-DEPLOY_COMPOSE := -f docker-compose.prod.yml
+DEPLOY_COMPOSE := -p home-monitor -f docker-compose.prod.yml
 
 # =============================================================================
 # Help
@@ -131,6 +131,32 @@ enphase-gateway-init-remote:  ## [remote] 🔑 Fetch tokens from Enlighten for a
 	@docker --context $(DEPLOY_CONTEXT) info >/dev/null 2>&1 || \
 		(echo "❌ Cannot connect to remote Docker. Run 'make deploy-setup' first." && exit 1)
 	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) --profile manual run --rm fetcher python scripts/manage_gateway_tokens.py init
+
+enphase-exchange-remote:  ## [remote] 🔄 Exchange Enphase authorization code for access token (usage: make enphase-exchange-remote CODE=code [APP=N])
+	@if [ -z "$(CODE)" ]; then \
+		echo "❌ ERROR: CODE parameter is required"; \
+		echo ""; \
+		echo "Usage: make enphase-exchange-remote CODE=your_authorization_code [APP=N]"; \
+		echo ""; \
+		echo "Options:"; \
+		echo "  CODE  - Authorization code from the redirect URL (required)"; \
+		echo "  APP   - App index for multi-app mode (1, 2, 3, ...). Omit for legacy single-app."; \
+		echo ""; \
+		echo "Examples:"; \
+		echo "  make enphase-exchange-remote CODE=xxxxx APP=1    # Multi-app mode"; \
+		echo "  make enphase-exchange-remote CODE=xxxxx          # Legacy single-app mode"; \
+		exit 1; \
+	fi
+	@echo "🔄 Exchanging Enphase authorization code on $(DEPLOY_HOST)..."
+	@docker --context $(DEPLOY_CONTEXT) info >/dev/null 2>&1 || \
+		(echo "❌ Cannot connect to remote Docker. Run 'make deploy-setup' first." && exit 1)
+	docker --context $(DEPLOY_CONTEXT) exec home-monitor-fetcher-scheduled python scripts/get_enphase_token.py --exchange-code "$(CODE)" $(if $(APP),--app $(APP))
+
+enphase-list-apps-remote:  ## [remote] 📋 List configured Enphase apps and their status
+	@echo "📋 Listing Enphase apps on $(DEPLOY_HOST)..."
+	@docker --context $(DEPLOY_CONTEXT) info >/dev/null 2>&1 || \
+		(echo "❌ Cannot connect to remote Docker. Run 'make deploy-setup' first." && exit 1)
+	docker --context $(DEPLOY_CONTEXT) exec home-monitor-fetcher-scheduled python scripts/get_enphase_token.py --list-apps
 
 enphase-exchange:  ## [local] 🔄 Exchange Enphase authorization code for access token (usage: make enphase-exchange CODE=code [APP=N])
 	@if [ -z "$(CODE)" ]; then \
