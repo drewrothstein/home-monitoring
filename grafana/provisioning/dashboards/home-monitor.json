@@ -11,6 +11,7 @@
     "irrigation",
     "propane",
     "pool",
+    "span",
     "system"
   ],
   "style": "dark",
@@ -3775,12 +3776,792 @@
       }
     },
     {
-      "id": 39,
+      "id": 80,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 92
+      },
+      "type": "row",
+      "title": "Span Electrical Panel(s)",
+      "collapsed": false
+    },
+    {
+      "id": 81,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 93
+      },
+      "type": "timeseries",
+      "title": "Span Grid Power",
+      "targets": [
+        {
+          "datasource": "Home Monitor PostgreSQL",
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  spr.timestamp AS \"time\",\n  COALESCE(spt.panel_name, spr.panel_serial) AS metric,\n  spr.instant_grid_power_w / 1000.0 AS \"Grid Power (kW)\"\nFROM span_panel_readings spr\nJOIN locations l ON spr.location_id = l.id\nLEFT JOIN span_panel_tokens spt ON spr.panel_serial = spt.panel_serial\nWHERE spr.timestamp >= $__timeFrom() AND spr.timestamp <= $__timeTo()\n  AND l.name IN ($location)\nORDER BY \"time\" ",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "kwatt"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ]
+        }
+      },
+      "description": "Total grid power measured by Span panel (positive = importing, negative = exporting)."
+    },
+    {
+      "id": 82,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 93
+      },
+      "type": "timeseries",
+      "title": "Span Feedthrough Power",
+      "targets": [
+        {
+          "datasource": "Home Monitor PostgreSQL",
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  spr.timestamp AS \"time\",\n  COALESCE(spt.panel_name, spr.panel_serial) AS metric,\n  spr.feedthrough_power_w / 1000.0 AS \"Feedthrough Power (kW)\"\nFROM span_panel_readings spr\nJOIN locations l ON spr.location_id = l.id\nLEFT JOIN span_panel_tokens spt ON spr.panel_serial = spt.panel_serial\nWHERE spr.timestamp >= $__timeFrom() AND spr.timestamp <= $__timeTo()\n  AND l.name IN ($location)\nORDER BY \"time\" ",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "kwatt"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ]
+        }
+      },
+      "description": "Power flowing through non-Span breakers (not individually monitored)."
+    },
+    {
+      "id": 83,
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 93
+      },
+      "type": "table",
+      "title": "Panel Status",
+      "targets": [
+        {
+          "datasource": "Home Monitor PostgreSQL",
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH latest AS (\n  SELECT panel_serial, MAX(timestamp) as latest_time\n  FROM span_panel_readings spr\n  JOIN locations l ON spr.location_id = l.id\n  WHERE l.name IN ($location)\n  GROUP BY panel_serial\n)\nSELECT\n  COALESCE(spt.panel_name, spr.panel_serial) AS \"Panel\",\n  spr.main_relay_state AS \"Main Relay\",\n  spr.dsm_grid_state AS \"Grid State\",\n  spr.door_state AS \"Door\",\n  CASE\n    WHEN spr.eth0_link THEN 'Ethernet'\n    WHEN spr.wlan_link THEN 'WiFi'\n    WHEN spr.wwan_link THEN 'Cellular'\n    ELSE 'None'\n  END AS \"Network\",\n  spr.firmware_version AS \"Firmware\",\n  ROUND(spr.uptime_seconds / 86400.0, 1) || ' days' AS \"Uptime\"\nFROM span_panel_readings spr\nJOIN latest ON spr.panel_serial = latest.panel_serial AND spr.timestamp = latest.latest_time\nLEFT JOIN span_panel_tokens spt ON spr.panel_serial = spt.panel_serial",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Main Relay"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "CLOSED": {
+                        "color": "green",
+                        "text": "CLOSED"
+                      }
+                    },
+                    "type": "value"
+                  },
+                  {
+                    "options": {
+                      "OPEN": {
+                        "color": "red",
+                        "text": "OPEN"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Door"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "CLOSED": {
+                        "color": "green",
+                        "text": "CLOSED"
+                      }
+                    },
+                    "type": "value"
+                  },
+                  {
+                    "options": {
+                      "OPEN": {
+                        "color": "yellow",
+                        "text": "OPEN"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      }
+    },
+    {
+      "id": 84,
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 97
+      },
+      "type": "stat",
+      "title": "Battery SOC",
+      "targets": [
+        {
+          "datasource": "Home Monitor PostgreSQL",
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "-- Span Battery 1: Get the latest reading for panel at index 0\n-- Uses ROW_NUMBER to identify panels by order of panel_serial\n-- Returns time_series format so metric column becomes the series name\nWITH latest AS (\n  SELECT panel_serial, MAX(timestamp) as latest_time\n  FROM span_panel_readings spr\n  JOIN locations l ON spr.location_id = l.id\n  WHERE l.name IN ($location)\n  GROUP BY panel_serial\n),\npanel_rankings AS (\n  SELECT\n    spr.panel_serial,\n    spr.timestamp as \"time\",\n    COALESCE(spt.panel_name, spr.panel_serial) AS metric,\n    spr.battery_soe_percent AS \"Battery SOC\",\n    ROW_NUMBER() OVER (ORDER BY spr.panel_serial) as panel_rn\n  FROM span_panel_readings spr\n  JOIN latest ON spr.panel_serial = latest.panel_serial AND spr.timestamp = latest.latest_time\n  LEFT JOIN span_panel_tokens spt ON spr.panel_serial = spt.panel_serial\n)\nSELECT \"time\", metric, \"Battery SOC\"\nFROM panel_rankings\nWHERE panel_rn = 1",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 20
+              },
+              {
+                "color": "green",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 95,
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 97
+      },
+      "type": "stat",
+      "title": "Battery SOC",
+      "targets": [
+        {
+          "datasource": "Home Monitor PostgreSQL",
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "-- Span Battery 2: Get the latest reading for panel at index 1\n-- Uses ROW_NUMBER to identify panels by order of panel_serial\n-- Returns time_series format so metric column becomes the series name\nWITH latest AS (\n  SELECT panel_serial, MAX(timestamp) as latest_time\n  FROM span_panel_readings spr\n  JOIN locations l ON spr.location_id = l.id\n  WHERE l.name IN ($location)\n  GROUP BY panel_serial\n),\npanel_rankings AS (\n  SELECT\n    spr.panel_serial,\n    spr.timestamp as \"time\",\n    COALESCE(spt.panel_name, spr.panel_serial) AS metric,\n    spr.battery_soe_percent AS \"Battery SOC\",\n    ROW_NUMBER() OVER (ORDER BY spr.panel_serial) as panel_rn\n  FROM span_panel_readings spr\n  JOIN latest ON spr.panel_serial = latest.panel_serial AND spr.timestamp = latest.latest_time\n  LEFT JOIN span_panel_tokens spt ON spr.panel_serial = spt.panel_serial\n)\nSELECT \"time\", metric, \"Battery SOC\"\nFROM panel_rankings\nWHERE panel_rn = 2",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 20
+              },
+              {
+                "color": "green",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 85,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 101
+      },
+      "type": "bargauge",
+      "title": "Top 10 Circuits by Power",
+      "description": "Top 10 circuits by absolute power consumption.",
+      "targets": [
+        {
+          "datasource": "Home Monitor PostgreSQL",
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH latest AS (\n  SELECT panel_serial, MAX(timestamp) as latest_time\n  FROM span_circuit_readings scr\n  JOIN locations l ON scr.location_id = l.id\n  WHERE l.name IN ($location)\n  GROUP BY panel_serial\n),\nranked AS (\n  SELECT\n    scr.circuit_name AS metric,\n    scr.instant_power_w AS \"Power (W)\",\n    ROW_NUMBER() OVER (PARTITION BY scr.panel_serial ORDER BY ABS(scr.instant_power_w) DESC) as rn\n  FROM span_circuit_readings scr\n  JOIN latest ON scr.panel_serial = latest.panel_serial AND scr.timestamp = latest.latest_time\n)\nSELECT metric, \"Power (W)\"\nFROM ranked\nWHERE rn <= 10\nORDER BY ABS(\"Power (W)\") DESC",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "rowsToFields",
+          "options": {
+            "mappings": [
+              {
+                "fieldName": "metric",
+                "handlerKey": "field.name"
+              },
+              {
+                "fieldName": "Power (W)",
+                "handlerKey": "field.value"
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-GrYlRd"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "lcd",
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "pluginVersion": "12.3.1"
+    },
+    {
+      "id": 86,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 101
+      },
+      "type": "timeseries",
+      "title": "Total Circuit Power",
+      "targets": [
+        {
+          "datasource": "Home Monitor PostgreSQL",
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT\n  scr.timestamp AS \"time\",\n  COALESCE(spt.panel_name, scr.panel_serial) AS metric,\n  SUM(scr.instant_power_w) / 1000.0 AS \"Total Circuit Power (kW)\"\nFROM span_circuit_readings scr\nJOIN locations l ON scr.location_id = l.id\nLEFT JOIN span_panel_tokens spt ON scr.panel_serial = spt.panel_serial\nWHERE scr.timestamp >= $__timeFrom() AND scr.timestamp <= $__timeTo()\n  AND l.name IN ($location)\nGROUP BY scr.timestamp, scr.panel_serial, spt.panel_name\nORDER BY \"time\" ",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "kwatt"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
+          ]
+        }
+      },
+      "description": "Sum of all circuit power readings over time."
+    },
+    {
+      "id": 87,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 101
+      },
+      "type": "piechart",
+      "title": "Top Energy Consumers",
+      "description": "Top 10 circuits by total energy consumption in selected time range.",
+      "targets": [
+        {
+          "datasource": "Home Monitor PostgreSQL",
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH energy_totals AS (\n  SELECT\n    scr.circuit_name,\n    MAX(scr.import_energy_wh) - MIN(scr.import_energy_wh) AS energy_wh\n  FROM span_circuit_readings scr\n  JOIN locations l ON scr.location_id = l.id\n  WHERE scr.timestamp >= $__timeFrom() AND scr.timestamp <= $__timeTo()\n    AND l.name IN ($location)\n  GROUP BY scr.circuit_name\n)\nSELECT\n  circuit_name AS metric,\n  energy_wh / 1000.0 AS \"Energy (kWh)\"\nFROM energy_totals\nWHERE energy_wh > 0\nORDER BY energy_wh DESC\nLIMIT 10",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "unit": "kWh"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "pieType": "pie",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 88,
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 109
+      },
+      "type": "table",
+      "title": "Circuit Details",
+      "description": "Current status and readings for all circuits.",
+      "targets": [
+        {
+          "datasource": "Home Monitor PostgreSQL",
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH latest AS (\n  SELECT panel_serial, MAX(timestamp) as latest_time\n  FROM span_circuit_readings scr\n  JOIN locations l ON scr.location_id = l.id\n  WHERE l.name IN ($location)\n  GROUP BY panel_serial\n)\nSELECT\n  scr.circuit_name AS \"Circuit\",\n  ROUND(scr.instant_power_w::numeric, 1) AS \"Power (W)\",\n  ROUND((scr.import_energy_wh / 1000.0)::numeric, 2) AS \"Import (kWh)\",\n  ROUND((scr.export_energy_wh / 1000.0)::numeric, 2) AS \"Export (kWh)\",\n  scr.relay_state AS \"Relay\",\n  scr.priority AS \"Priority\"\nFROM span_circuit_readings scr\nJOIN latest ON scr.panel_serial = latest.panel_serial AND scr.timestamp = latest.latest_time\nORDER BY ABS(scr.instant_power_w) DESC",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Power (W)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "watt"
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "gradient-gauge"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 5000
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Import (kWh)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "kWh"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Export (kWh)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "kWh"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Relay"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "CLOSED": {
+                        "color": "green",
+                        "text": "ON"
+                      }
+                    },
+                    "type": "value"
+                  },
+                  {
+                    "options": {
+                      "OPEN": {
+                        "color": "red",
+                        "text": "OFF"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Priority"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "MUST_HAVE": {
+                        "color": "red",
+                        "text": "Must Have"
+                      }
+                    },
+                    "type": "value"
+                  },
+                  {
+                    "options": {
+                      "NICE_TO_HAVE": {
+                        "color": "yellow",
+                        "text": "Nice to Have"
+                      }
+                    },
+                    "type": "value"
+                  },
+                  {
+                    "options": {
+                      "NOT_ESSENTIAL": {
+                        "color": "green",
+                        "text": "Not Essential"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "Power (W)",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 39,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 119
       },
       "type": "row",
       "title": "Debug",
@@ -3792,7 +4573,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 93
+        "y": 120
       },
       "type": "bargauge",
       "title": "Irradiance Sources Comparison",

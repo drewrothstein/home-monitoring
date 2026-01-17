@@ -977,6 +977,40 @@ def init_database():
                     ("raw_data_meter_readings_channels_voltage", "TEXT"),
                     ("raw_data_meter_readings_channels_current", "TEXT"),
                     ("raw_data_meter_readings_channels_freq", "TEXT"),
+                    # Production JSON endpoint fields (production.json)
+                    ("raw_data_production_json_production", "TEXT"),
+                    ("raw_data_production_json_production_type", "TEXT"),
+                    ("raw_data_production_json_production_activeCount", "TEXT"),
+                    ("raw_data_production_json_production_readingTime", "TEXT"),
+                    ("raw_data_production_json_production_wNow", "TEXT"),
+                    ("raw_data_production_json_production_whLifetime", "TEXT"),
+                    ("raw_data_production_json_consumption", "TEXT"),
+                    ("raw_data_production_json_consumption_type", "TEXT"),
+                    ("raw_data_production_json_consumption_activeCount", "TEXT"),
+                    ("raw_data_production_json_consumption_measurementType", "TEXT"),
+                    ("raw_data_production_json_consumption_readingTime", "TEXT"),
+                    ("raw_data_production_json_consumption_wNow", "TEXT"),
+                    ("raw_data_production_json_consumption_whLifetime", "TEXT"),
+                    ("raw_data_production_json_consumption_varhLeadLifetime", "TEXT"),
+                    ("raw_data_production_json_consumption_varhLagLifetime", "TEXT"),
+                    ("raw_data_production_json_consumption_vahLifetime", "TEXT"),
+                    ("raw_data_production_json_consumption_rmsCurrent", "TEXT"),
+                    ("raw_data_production_json_consumption_rmsVoltage", "TEXT"),
+                    ("raw_data_production_json_consumption_reactPwr", "TEXT"),
+                    ("raw_data_production_json_consumption_apprntPwr", "TEXT"),
+                    ("raw_data_production_json_consumption_pwrFactor", "TEXT"),
+                    ("raw_data_production_json_consumption_whToday", "TEXT"),
+                    ("raw_data_production_json_consumption_whLastSevenDays", "TEXT"),
+                    ("raw_data_production_json_consumption_vahToday", "TEXT"),
+                    ("raw_data_production_json_consumption_varhLeadToday", "TEXT"),
+                    ("raw_data_production_json_consumption_varhLagToday", "TEXT"),
+                    ("raw_data_production_json_storage", "TEXT"),
+                    ("raw_data_production_json_storage_type", "TEXT"),
+                    ("raw_data_production_json_storage_activeCount", "TEXT"),
+                    ("raw_data_production_json_storage_readingTime", "TEXT"),
+                    ("raw_data_production_json_storage_wNow", "TEXT"),
+                    ("raw_data_production_json_storage_whNow", "TEXT"),
+                    ("raw_data_production_json_storage_state", "TEXT"),
                     # Raw data JSONB - MUST be last column
                     ("raw_data", "JSONB"),
                 ],
@@ -997,6 +1031,91 @@ def init_database():
                 );
                 CREATE INDEX IF NOT EXISTS idx_enphase_gateway_tokens_serial
                     ON enphase_gateway_tokens(gateway_serial);
+            """
+            )
+
+            # Create span_panel_tokens table for Span panel token storage
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS span_panel_tokens (
+                    id SERIAL PRIMARY KEY,
+                    panel_serial VARCHAR(255) NOT NULL UNIQUE,
+                    panel_host VARCHAR(255) NOT NULL,
+                    panel_name VARCHAR(255),
+                    token TEXT NOT NULL,
+                    token_created_at TIMESTAMPTZ,
+                    location_id INTEGER REFERENCES locations(id) ON DELETE SET NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_span_panel_tokens_serial
+                    ON span_panel_tokens(panel_serial);
+            """
+            )
+
+            # Create span_panel_readings table for panel-level data (every fetch cycle)
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS span_panel_readings (
+                    id SERIAL PRIMARY KEY,
+                    location_id INTEGER NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+                    panel_serial VARCHAR(255) NOT NULL,
+                    timestamp TIMESTAMPTZ NOT NULL,
+                    instant_grid_power_w DOUBLE PRECISION,
+                    feedthrough_power_w DOUBLE PRECISION,
+                    main_relay_state VARCHAR(50),
+                    dsm_grid_state VARCHAR(50),
+                    dsm_state VARCHAR(50),
+                    current_run_config VARCHAR(50),
+                    door_state VARCHAR(50),
+                    firmware_version VARCHAR(100),
+                    uptime_seconds INTEGER,
+                    battery_soe_percent DOUBLE PRECISION,
+                    eth0_link BOOLEAN,
+                    wlan_link BOOLEAN,
+                    wwan_link BOOLEAN,
+                    source VARCHAR(50) NOT NULL DEFAULT 'span',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    raw_data JSONB
+                );
+                CREATE INDEX IF NOT EXISTS idx_span_panel_readings_location_id
+                    ON span_panel_readings(location_id);
+                CREATE INDEX IF NOT EXISTS idx_span_panel_readings_timestamp
+                    ON span_panel_readings(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_span_panel_readings_panel_serial
+                    ON span_panel_readings(panel_serial);
+            """
+            )
+
+            # Create span_circuit_readings table for circuit-level data (every 15 min)
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS span_circuit_readings (
+                    id SERIAL PRIMARY KEY,
+                    location_id INTEGER NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+                    panel_serial VARCHAR(255) NOT NULL,
+                    timestamp TIMESTAMPTZ NOT NULL,
+                    circuit_id VARCHAR(255) NOT NULL,
+                    circuit_name VARCHAR(255),
+                    tabs TEXT,
+                    instant_power_w DOUBLE PRECISION,
+                    import_energy_wh DOUBLE PRECISION,
+                    export_energy_wh DOUBLE PRECISION,
+                    relay_state VARCHAR(50),
+                    priority VARCHAR(50),
+                    is_user_controllable BOOLEAN,
+                    is_sheddable BOOLEAN,
+                    is_never_backup BOOLEAN,
+                    source VARCHAR(50) NOT NULL DEFAULT 'span',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    raw_data JSONB
+                );
+                CREATE INDEX IF NOT EXISTS idx_span_circuit_readings_location_id
+                    ON span_circuit_readings(location_id);
+                CREATE INDEX IF NOT EXISTS idx_span_circuit_readings_timestamp
+                    ON span_circuit_readings(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_span_circuit_readings_panel_circuit
+                    ON span_circuit_readings(panel_serial, circuit_id, timestamp);
             """
             )
 
@@ -2009,3 +2128,309 @@ def delete_enphase_gateway_token(gateway_serial: str) -> bool:
                 (gateway_serial,),
             )
             return cur.rowcount > 0
+
+
+# =============================================================================
+# Span Panel Functions
+# =============================================================================
+
+
+def get_span_panel_token(panel_serial: str) -> Optional[Dict[str, Any]]:
+    """
+    Get token for a specific Span panel.
+
+    Args:
+        panel_serial: Serial number of the panel
+
+    Returns:
+        Dictionary with token, panel_host, panel_name, etc., or None if not found
+    """
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT panel_serial, panel_host, panel_name, token, token_created_at, location_id
+                FROM span_panel_tokens
+                WHERE panel_serial = %s
+                """,
+                (panel_serial,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def get_span_panel_token_by_host(panel_host: str) -> Optional[Dict[str, Any]]:
+    """
+    Get token for a Span panel by host address.
+
+    Args:
+        panel_host: IP address or hostname of the panel
+
+    Returns:
+        Dictionary with token info, or None if not found
+    """
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT panel_serial, panel_host, panel_name, token, token_created_at, location_id
+                FROM span_panel_tokens
+                WHERE panel_host = %s
+                """,
+                (panel_host,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def get_all_span_panel_tokens() -> List[Dict[str, Any]]:
+    """
+    Get all stored Span panel tokens.
+
+    Returns:
+        List of dictionaries with panel info and tokens
+    """
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT panel_serial, panel_host, panel_name, token, token_created_at,
+                       location_id, created_at, updated_at
+                FROM span_panel_tokens
+                ORDER BY panel_name, panel_serial
+                """
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def upsert_span_panel_token(
+    panel_serial: str,
+    panel_host: str,
+    token: str,
+    panel_name: Optional[str] = None,
+    token_created_at: Optional[datetime] = None,
+    location_id: Optional[int] = None,
+) -> int:
+    """
+    Insert or update a Span panel token.
+
+    Args:
+        panel_serial: Serial number of the panel
+        panel_host: IP address or hostname of the panel
+        token: Panel access token
+        panel_name: Human-readable name for the panel
+        token_created_at: When the token was created
+        location_id: Associated location ID (optional)
+
+    Returns:
+        The token record ID
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO span_panel_tokens
+                    (panel_serial, panel_host, panel_name, token, token_created_at, location_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (panel_serial) DO UPDATE SET
+                    panel_host = EXCLUDED.panel_host,
+                    panel_name = COALESCE(EXCLUDED.panel_name, span_panel_tokens.panel_name),
+                    token = EXCLUDED.token,
+                    token_created_at = EXCLUDED.token_created_at,
+                    location_id = COALESCE(EXCLUDED.location_id, span_panel_tokens.location_id),
+                    updated_at = NOW()
+                RETURNING id
+                """,
+                (panel_serial, panel_host, panel_name, token, token_created_at, location_id),
+            )
+            return cur.fetchone()[0]
+
+
+def delete_span_panel_token(panel_serial: str) -> bool:
+    """
+    Delete a Span panel token.
+
+    Args:
+        panel_serial: Serial number of the panel
+
+    Returns:
+        True if a token was deleted, False if not found
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM span_panel_tokens
+                WHERE panel_serial = %s
+                """,
+                (panel_serial,),
+            )
+            return cur.rowcount > 0
+
+
+def insert_span_panel_reading(
+    location_id: int,
+    panel_serial: str,
+    timestamp: datetime,
+    instant_grid_power_w: Optional[float] = None,
+    feedthrough_power_w: Optional[float] = None,
+    main_relay_state: Optional[str] = None,
+    dsm_grid_state: Optional[str] = None,
+    dsm_state: Optional[str] = None,
+    current_run_config: Optional[str] = None,
+    door_state: Optional[str] = None,
+    firmware_version: Optional[str] = None,
+    uptime_seconds: Optional[int] = None,
+    battery_soe_percent: Optional[float] = None,
+    eth0_link: Optional[bool] = None,
+    wlan_link: Optional[bool] = None,
+    wwan_link: Optional[bool] = None,
+    source: str = "span",
+    raw_data: Optional[Dict[str, Any]] = None,
+) -> int:
+    """
+    Insert a Span panel reading and return the ID.
+
+    Args:
+        location_id: Database location ID
+        panel_serial: Serial number of the panel
+        timestamp: Reading timestamp
+        instant_grid_power_w: Total grid power in watts
+        feedthrough_power_w: Power through non-Span breakers
+        main_relay_state: Main relay state (OPEN/CLOSED)
+        dsm_grid_state: DSM grid state
+        dsm_state: DSM state
+        current_run_config: Current run configuration
+        door_state: Panel door state (OPEN/CLOSED)
+        firmware_version: Panel firmware version
+        uptime_seconds: Panel uptime in seconds
+        battery_soe_percent: Battery state of energy percentage
+        eth0_link: Ethernet link status
+        wlan_link: WiFi link status
+        wwan_link: Cellular link status
+        source: Data source identifier
+        raw_data: Raw API response data
+
+    Returns:
+        The inserted reading ID
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO span_panel_readings (
+                    location_id, panel_serial, timestamp, instant_grid_power_w,
+                    feedthrough_power_w, main_relay_state, dsm_grid_state, dsm_state,
+                    current_run_config, door_state, firmware_version, uptime_seconds,
+                    battery_soe_percent, eth0_link, wlan_link, wwan_link, source, raw_data
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    location_id,
+                    panel_serial,
+                    timestamp,
+                    instant_grid_power_w,
+                    feedthrough_power_w,
+                    main_relay_state,
+                    dsm_grid_state,
+                    dsm_state,
+                    current_run_config,
+                    door_state,
+                    firmware_version,
+                    uptime_seconds,
+                    battery_soe_percent,
+                    eth0_link,
+                    wlan_link,
+                    wwan_link,
+                    source,
+                    json.dumps(raw_data) if raw_data else None,
+                ),
+            )
+            return cur.fetchone()[0]
+
+
+def insert_span_circuit_readings(
+    location_id: int,
+    panel_serial: str,
+    timestamp: datetime,
+    circuits: List[Dict[str, Any]],
+    source: str = "span",
+) -> int:
+    """
+    Bulk insert Span circuit readings.
+
+    Args:
+        location_id: Database location ID
+        panel_serial: Serial number of the panel
+        timestamp: Reading timestamp
+        circuits: List of circuit data dictionaries
+        source: Data source identifier
+
+    Returns:
+        Number of circuits inserted
+    """
+    if not circuits:
+        return 0
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for circuit in circuits:
+                tabs_json = json.dumps(circuit.get("tabs")) if circuit.get("tabs") else None
+                raw_data_json = (
+                    json.dumps(circuit.get("raw_data")) if circuit.get("raw_data") else None
+                )
+
+                cur.execute(
+                    """
+                    INSERT INTO span_circuit_readings (
+                        location_id, panel_serial, timestamp, circuit_id, circuit_name,
+                        tabs, instant_power_w, import_energy_wh, export_energy_wh,
+                        relay_state, priority, is_user_controllable, is_sheddable,
+                        is_never_backup, source, raw_data
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        location_id,
+                        panel_serial,
+                        timestamp,
+                        circuit.get("circuit_id"),
+                        circuit.get("circuit_name"),
+                        tabs_json,
+                        circuit.get("instant_power_w"),
+                        circuit.get("import_energy_wh"),
+                        circuit.get("export_energy_wh"),
+                        circuit.get("relay_state"),
+                        circuit.get("priority"),
+                        circuit.get("is_user_controllable"),
+                        circuit.get("is_sheddable"),
+                        circuit.get("is_never_backup"),
+                        source,
+                        raw_data_json,
+                    ),
+                )
+
+            return len(circuits)
+
+
+def get_last_span_circuit_reading_time(panel_serial: str) -> Optional[datetime]:
+    """
+    Get the timestamp of the most recent circuit reading for a panel.
+
+    Args:
+        panel_serial: Serial number of the panel
+
+    Returns:
+        Timestamp of last circuit reading, or None if no readings exist
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT MAX(timestamp) FROM span_circuit_readings
+                WHERE panel_serial = %s
+                """,
+                (panel_serial,),
+            )
+            result = cur.fetchone()
+            return result[0] if result and result[0] else None

@@ -23,6 +23,7 @@ A multi-location home monitoring application that collects data from various API
   - [Flume API](#flume-api)
   - [Tank Utility API](#tank-utility-api)
   - [iAqualink API](#iaqualink-api)
+  - [Span Panel API](#span-panel-api)
 - [Grafana Dashboard](#grafana-dashboard)
 - [Database Schema](#database-schema)
 - [Makefile Commands](#makefile-commands)
@@ -43,7 +44,7 @@ A multi-location home monitoring application that collects data from various API
 ## Features
 
 - **Multi-location support**: Track multiple homes/properties from a single configuration
-- **Multiple API integrations**: Tesla/Powerwall, Enphase solar, OpenWeather, Tempest weather stations, Flume water meters, Tank Utility propane monitors, iAqualink pool controllers
+- **Multiple API integrations**: Tesla/Powerwall, Enphase solar, Span panels, OpenWeather, Tempest weather stations, Flume water meters, Tank Utility propane monitors, iAqualink pool controllers
 - **PostgreSQL database**: Time-series data storage compatible with Grafana
 - **Auto-provisioned Grafana dashboard**: Pre-configured dashboards for immediate visualization
 - **Docker-ready**: Easy deployment to any Docker-capable host (Raspberry Pi, NAS, etc.)
@@ -101,6 +102,7 @@ All integrations are **optional**. Configure only the ones you have hardware/acc
 | **Rachio** | Sprinkler Runs | Irrigation controller watering events |
 | **Tank Utility** | Propane Levels | Propane tank monitoring (fill level, temperature) |
 | **iAqualink** | Pool/Spa | Pool controller monitoring (temps, pumps, heaters) |
+| **Span** | Electrical Panel | Smart panel circuit-level power monitoring |
 
 ## Quick Start
 
@@ -288,6 +290,11 @@ Define your locations and API configurations in `sites.json`. All integrations a
       "iaqualink": {
         "serial_number": "your_pool_controller_serial",
         "device_name": "Pool Controller"
+      },
+      "span": {
+        "panels": [
+          {"host": "192.168.1.200", "name": "Main Panel"}
+        ]
       }
     }
   }
@@ -317,6 +324,7 @@ All API integrations are optional. Configure only the ones you have hardware/acc
 | `tankutility.device_id` | Tank Utility propane monitor device ID |
 | `iaqualink.serial_number` | iAqualink pool controller serial number |
 | `iaqualink.device_name` | iAqualink device name (alternative to serial_number) |
+| `span.panels` | Array of Span panel configs (host + name) |
 
 If you don't use OpenWeather but need coordinates for database storage, use:
 ```json
@@ -873,6 +881,92 @@ iAqualink monitors pool and spa equipment from Zodiac/Jandy pool controllers.
 - Pool heater status (on/off)
 - Spa heater status (on/off)
 
+### Span Panel API
+
+Span Power Panels provide circuit-level power monitoring through a local HTTP API. This is an unofficial integration based on community documentation.
+
+**Requirements**:
+- Network access to your Span panel (local network only)
+- Physical access to the panel for initial token registration
+
+#### Setup
+
+1. **Find your panel IP**: Check your router's DHCP client list for the Span panel
+
+2. **Unlock the panel** (required for registration):
+   - Open the panel door
+   - Press the door sensor button (at the top) 3 times within 15 seconds
+   - Wait for the frame lights to blink (confirms unlock)
+   - The panel stays unlocked for 15 minutes
+
+3. **Register a client**:
+   ```bash
+   # Local (if panel is on the same network)
+   make span-register HOST=192.168.1.200 NAME="Main Panel"
+
+   # Remote (if panel is only accessible from the Pi)
+   make span-register-remote HOST=192.168.1.200 NAME="Main Panel"
+   ```
+
+4. **Configure in sites.json**:
+   ```json
+   "span": {
+     "panels": [
+       {"host": "192.168.1.200", "name": "Main Panel"}
+     ]
+   }
+   ```
+
+5. **Test connectivity**:
+   ```bash
+   make span-test HOST=192.168.1.200
+   # or remote:
+   make span-test-remote HOST=192.168.1.200
+   ```
+
+#### Token Management
+
+```bash
+# List all panel tokens
+make span-list
+make span-list-remote
+
+# Store an existing token (if you already have one)
+make span-store HOST=192.168.1.200 TOKEN="eyJ..." NAME="Main Panel"
+
+# Delete a token
+make span-delete SERIAL=nt-2243-001cx
+```
+
+#### Multiple Panels
+
+Configure multiple panels per site:
+
+```json
+"span": {
+  "panels": [
+    {"host": "192.168.1.200", "name": "Main Panel"},
+    {"host": "192.168.1.201", "name": "Garage Panel"}
+  ]
+}
+```
+
+#### Data Collection Intervals
+
+- **Panel-level data** (grid power, status): Every fetch cycle (~5 minutes)
+- **Circuit-level data** (per-circuit power, energy): Configurable interval (default: 15 minutes)
+
+To adjust circuit fetch interval:
+```bash
+# In .env
+SPAN_CIRCUIT_FETCH_INTERVAL_MINUTES=15
+```
+
+**Data collected**:
+- Panel: Grid power, feedthrough power, main relay state, door state, network status
+- Circuits: Power (W), cumulative energy (Wh import/export), relay state, priority
+- Battery SOC (if connected)
+
 ## Grafana Dashboard
 
 A pre-configured dashboard is automatically provisioned with panels for:
@@ -916,6 +1010,9 @@ make generate-dashboard-local
 | `sprinkler_runs` | Rachio sprinkler watering events |
 | `propane_readings` | Propane tank levels from Tank Utility |
 | `pool_readings` | Pool/spa data from iAqualink |
+| `span_panel_tokens` | Span panel access tokens |
+| `span_panel_readings` | Panel-level power data (grid power, status) |
+| `span_circuit_readings` | Per-circuit power and energy data |
 | `system_readings` | Host/container CPU, memory, and disk usage |
 
 All time-series tables include `timestamp` and `location_id` for efficient Grafana queries. The `system_readings` table is an exception—it tracks the fetcher host, not a specific location.
@@ -985,6 +1082,16 @@ All time-series tables include `timestamp` and `location_id` for efficient Grafa
 | `make enphase-gateway-delete SERIAL=x` | Delete a gateway token |
 | `make enphase-gateway-init` | Fetch tokens from Enlighten for all gateways in sites.json that don't have tokens |
 
+### Span Panel Token Management (Local)
+
+| Command | Description |
+|---------|-------------|
+| `make span-register HOST=x [NAME=x]` | Register with a panel (requires panel unlock) |
+| `make span-store HOST=x TOKEN=x [NAME=x]` | Store an existing panel token |
+| `make span-list` | List all panel tokens |
+| `make span-test HOST=x` | Test panel connectivity |
+| `make span-delete SERIAL=x` | Delete a panel token |
+
 ### Infrastructure (Remote)
 
 | Command | Description |
@@ -1012,6 +1119,11 @@ All time-series tables include `timestamp` and `location_id` for efficient Grafa
 | `make deploy-fix-permissions-remote` | Fix permissions on remote config directory (requires sudo) |
 | `make redeploy-fetcher-remote` | Init DB, rebuild fetcher, and restart scheduled fetcher |
 | `make enphase-gateway-init-remote` | Fetch tokens from Enlighten for all gateways in sites.json that don't have tokens |
+| `make span-register-remote HOST=x [NAME=x]` | Register with a panel from remote |
+| `make span-store-remote HOST=x TOKEN=x [NAME=x]` | Store panel token on remote |
+| `make span-list-remote` | List panel tokens on remote |
+| `make span-test-remote HOST=x` | Test panel connectivity from remote |
+| `make span-delete-remote SERIAL=x` | Delete panel token on remote |
 
 ### Dashboard
 
@@ -1042,7 +1154,8 @@ home-monitor/
 │   │   ├── flume.py
 │   │   ├── rachio.py
 │   │   ├── tankutility.py
-│   │   └── iaqualink.py
+│   │   ├── iaqualink.py
+│   │   └── span.py
 │   ├── config.py           # Credential management
 │   ├── database.py         # Database schema and operations
 │   ├── enphase_app_manager.py  # Multi-app Enphase rotation & failover
@@ -1056,6 +1169,7 @@ home-monitor/
 │   ├── get_enphase_token.py
 │   ├── get_flume_token.py
 │   ├── manage_gateway_tokens.py  # Enphase local gateway tokens
+│   ├── manage_span_tokens.py     # Span panel token management
 │   ├── rachio_backfill.py
 │   └── test_service.py
 ├── grafana/                # Grafana provisioning
@@ -1087,6 +1201,9 @@ make test-service SERVICE=openweather LAT=42.05 LON=-73.89
 
 # Test Tempest
 make test-service SERVICE=tempest STATION_ID=35943
+
+# Test Span panel
+make test-service SERVICE=span LOCATION=FOO
 
 # Save results to database
 make test-service SERVICE=openweather SAVE_TO_DB=1

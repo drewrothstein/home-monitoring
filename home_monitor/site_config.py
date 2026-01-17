@@ -204,6 +204,28 @@ def validate_site_config(site_name: str, site_config: Dict[str, Any]) -> None:
                     f"Site '{site_name}': 'rachio.device_id' must be an integer or string"
                 )
 
+    # Span is optional
+    if "span" in site_config:
+        if not isinstance(site_config["span"], dict):
+            raise ValueError(f"Site '{site_name}': 'span' must be a dictionary")
+        if "panels" in site_config["span"]:
+            panels = site_config["span"]["panels"]
+            if not isinstance(panels, list):
+                raise ValueError(f"Site '{site_name}': 'span.panels' must be a list")
+            for i, panel in enumerate(panels):
+                if not isinstance(panel, dict):
+                    raise ValueError(f"Site '{site_name}': 'span.panels[{i}]' must be a dictionary")
+                if "host" not in panel:
+                    raise ValueError(f"Site '{site_name}': 'span.panels[{i}].host' is required")
+                if not isinstance(panel["host"], str):
+                    raise ValueError(
+                        f"Site '{site_name}': 'span.panels[{i}].host' must be a string"
+                    )
+                if "name" in panel and not isinstance(panel["name"], str):
+                    raise ValueError(
+                        f"Site '{site_name}': 'span.panels[{i}].name' must be a string"
+                    )
+
 
 def get_sites() -> Dict[str, Dict[str, Any]]:
     """

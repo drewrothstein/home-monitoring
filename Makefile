@@ -13,10 +13,14 @@ IMAGE_TAG ?= latest
 # These can be set in .env file to keep your personal values private
 # Defaults are provided for open source users
 DEPLOY_HOST ?= pi@raspberry-pi.local
-DEPLOY_CONTEXT ?= home-monitor-pi
 DEPLOY_CONFIG_PATH ?= /home/pi/home-monitor
 
-# Compose file for remote deployment (standalone production config)
+# Helper for running docker compose on remote via SSH
+# Usage: $(REMOTE_COMPOSE) up -d"  (note: must end command with closing quote)
+REMOTE_COMPOSE = ssh $(DEPLOY_HOST) "cd $(DEPLOY_CONFIG_PATH) && docker compose -f docker-compose.prod.yml
+
+# Legacy: Docker context (kept for compatibility but SSH is preferred for bind mounts)
+DEPLOY_CONTEXT ?= home-monitor-pi
 DEPLOY_COMPOSE := -p home-monitor -f docker-compose.prod.yml
 
 # =============================================================================
@@ -128,9 +132,8 @@ enphase-gateway-init:  ## [local] 🔑 Fetch tokens from Enlighten for all gatew
 
 enphase-gateway-init-remote:  ## [remote] 🔑 Fetch tokens from Enlighten for all gateways in sites.json that don't have tokens
 	@echo "🔑 Initializing Enphase gateway tokens on $(DEPLOY_HOST)..."
-	@docker --context $(DEPLOY_CONTEXT) info >/dev/null 2>&1 || \
-		(echo "❌ Cannot connect to remote Docker. Run 'make deploy-setup' first." && exit 1)
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) --profile manual run --rm fetcher python scripts/manage_gateway_tokens.py init
+	ssh $(DEPLOY_HOST) "cd $(DEPLOY_CONFIG_PATH) && docker compose -f docker-compose.prod.yml --profile manual run --rm fetcher \
+		python scripts/manage_gateway_tokens.py init"
 
 enphase-exchange-remote:  ## [remote] 🔄 Exchange Enphase authorization code for access token (usage: make enphase-exchange-remote CODE=code [APP=N])
 	@if [ -z "$(CODE)" ]; then \
@@ -148,15 +151,11 @@ enphase-exchange-remote:  ## [remote] 🔄 Exchange Enphase authorization code f
 		exit 1; \
 	fi
 	@echo "🔄 Exchanging Enphase authorization code on $(DEPLOY_HOST)..."
-	@docker --context $(DEPLOY_CONTEXT) info >/dev/null 2>&1 || \
-		(echo "❌ Cannot connect to remote Docker. Run 'make deploy-setup' first." && exit 1)
-	docker --context $(DEPLOY_CONTEXT) exec home-monitor-fetcher-scheduled python scripts/get_enphase_token.py --exchange-code "$(CODE)" $(if $(APP),--app $(APP))
+	ssh $(DEPLOY_HOST) "docker exec home-monitor-fetcher-scheduled python scripts/get_enphase_token.py --exchange-code '$(CODE)' $(if $(APP),--app $(APP))"
 
 enphase-list-apps-remote:  ## [remote] 📋 List configured Enphase apps and their status
 	@echo "📋 Listing Enphase apps on $(DEPLOY_HOST)..."
-	@docker --context $(DEPLOY_CONTEXT) info >/dev/null 2>&1 || \
-		(echo "❌ Cannot connect to remote Docker. Run 'make deploy-setup' first." && exit 1)
-	docker --context $(DEPLOY_CONTEXT) exec home-monitor-fetcher-scheduled python scripts/get_enphase_token.py --list-apps
+	ssh $(DEPLOY_HOST) "docker exec home-monitor-fetcher-scheduled python scripts/get_enphase_token.py --list-apps"
 
 enphase-exchange:  ## [local] 🔄 Exchange Enphase authorization code for access token (usage: make enphase-exchange CODE=code [APP=N])
 	@if [ -z "$(CODE)" ]; then \
@@ -235,6 +234,102 @@ flume-refresh:  ## [local] 🔄 Refresh Flume access token (usage: make flume-re
 flume-token:  ## [local] 🔐 Get Flume OAuth tokens using username/password (one-time setup)
 	@DATABASE_URL=$(DATABASE_URL) PYTHONPATH=. python scripts/get_flume_token.py
 
+span-register:  ## [local] 🔐 Register with a Span panel (usage: make span-register HOST=192.168.1.200 [NAME="Main Panel"] [LOCATION=FOO])
+	@if [ -z "$(HOST)" ]; then \
+		echo "❌ ERROR: HOST is required"; \
+		echo ""; \
+		echo "Usage: make span-register HOST=192.168.1.200 [NAME=\"Main Panel\"] [LOCATION=FOO]"; \
+		echo ""; \
+		echo "Options:"; \
+		echo "  HOST     - Panel IP address or hostname (required)"; \
+		echo "  NAME     - Human-readable name for the panel (optional)"; \
+		echo "  LOCATION - Site name to associate with (optional)"; \
+		echo ""; \
+		echo "Note: The panel must be unlocked (press door button 3x) before registering."; \
+		exit 1; \
+	fi
+	@DATABASE_URL=$(DATABASE_URL) PYTHONPATH=. python scripts/manage_span_tokens.py register \
+		--host "$(HOST)" $(if $(NAME),--name "$(NAME)") $(if $(LOCATION),--location "$(LOCATION)")
+
+span-store:  ## [local] 🔑 Store an existing Span panel token (usage: make span-store HOST=ip TOKEN=token [NAME=name] [LOCATION=FOO])
+	@if [ -z "$(HOST)" ] || [ -z "$(TOKEN)" ]; then \
+		echo "❌ ERROR: HOST and TOKEN are required"; \
+		echo ""; \
+		echo "Usage: make span-store HOST=192.168.1.200 TOKEN=token [NAME=\"Main Panel\"] [LOCATION=FOO]"; \
+		exit 1; \
+	fi
+	@DATABASE_URL=$(DATABASE_URL) PYTHONPATH=. python scripts/manage_span_tokens.py store \
+		--host "$(HOST)" --token "$(TOKEN)" $(if $(NAME),--name "$(NAME)") $(if $(LOCATION),--location "$(LOCATION)")
+
+span-list:  ## [local] 📋 List all stored Span panel tokens
+	@DATABASE_URL=$(DATABASE_URL) PYTHONPATH=. python scripts/manage_span_tokens.py list
+
+span-test:  ## [local] 🧪 Test connectivity to a Span panel (usage: make span-test HOST=192.168.1.200)
+	@if [ -z "$(HOST)" ]; then \
+		echo "❌ ERROR: HOST is required"; \
+		echo "Usage: make span-test HOST=192.168.1.200"; \
+		exit 1; \
+	fi
+	@DATABASE_URL=$(DATABASE_URL) PYTHONPATH=. python scripts/manage_span_tokens.py test --host "$(HOST)"
+
+span-delete:  ## [local] 🗑️  Delete a Span panel token (usage: make span-delete SERIAL=xxx)
+	@if [ -z "$(SERIAL)" ]; then \
+		echo "❌ ERROR: SERIAL is required"; \
+		echo "Usage: make span-delete SERIAL=<panel_serial>"; \
+		exit 1; \
+	fi
+	@DATABASE_URL=$(DATABASE_URL) PYTHONPATH=. python scripts/manage_span_tokens.py delete --serial "$(SERIAL)"
+
+span-register-remote:  ## [remote] 🔐 Register with a Span panel from remote (usage: make span-register-remote HOST=192.168.1.200 [NAME="Main Panel"] [LOCATION=FOO])
+	@if [ -z "$(HOST)" ]; then \
+		echo "❌ ERROR: HOST is required"; \
+		echo ""; \
+		echo "Usage: make span-register-remote HOST=192.168.1.200 [NAME=\"Main Panel\"] [LOCATION=FOO]"; \
+		echo ""; \
+		echo "Note: The panel must be unlocked (press door button 3x) before registering."; \
+		echo "      Run this from remote when panels are only accessible from that network."; \
+		exit 1; \
+	fi
+	@echo "🔐 Registering with Span panel at $(HOST) from $(DEPLOY_HOST)..."
+	ssh $(DEPLOY_HOST) "cd $(DEPLOY_CONFIG_PATH) && docker compose -f docker-compose.prod.yml --profile manual run --rm fetcher \
+		python scripts/manage_span_tokens.py register --host '$(HOST)' $(if $(NAME),--name '$(NAME)') $(if $(LOCATION),--location '$(LOCATION)')"
+
+span-store-remote:  ## [remote] 🔑 Store an existing Span panel token (usage: make span-store-remote HOST=ip TOKEN=token [NAME=name] [LOCATION=FOO])
+	@if [ -z "$(HOST)" ] || [ -z "$(TOKEN)" ]; then \
+		echo "❌ ERROR: HOST and TOKEN are required"; \
+		echo ""; \
+		echo "Usage: make span-store-remote HOST=192.168.1.200 TOKEN=token [NAME=\"Main Panel\"] [LOCATION=FOO]"; \
+		exit 1; \
+	fi
+	@echo "🔑 Storing Span panel token on $(DEPLOY_HOST)..."
+	ssh $(DEPLOY_HOST) "cd $(DEPLOY_CONFIG_PATH) && docker compose -f docker-compose.prod.yml --profile manual run --rm fetcher \
+		python scripts/manage_span_tokens.py store --host '$(HOST)' --token '$(TOKEN)' $(if $(NAME),--name '$(NAME)') $(if $(LOCATION),--location '$(LOCATION)')"
+
+span-list-remote:  ## [remote] 📋 List all stored Span panel tokens
+	@echo "📋 Listing Span panel tokens on $(DEPLOY_HOST)..."
+	ssh $(DEPLOY_HOST) "cd $(DEPLOY_CONFIG_PATH) && docker compose -f docker-compose.prod.yml --profile manual run --rm fetcher \
+		python scripts/manage_span_tokens.py list"
+
+span-test-remote:  ## [remote] 🧪 Test connectivity to a Span panel from remote (usage: make span-test-remote HOST=192.168.1.200)
+	@if [ -z "$(HOST)" ]; then \
+		echo "❌ ERROR: HOST is required"; \
+		echo "Usage: make span-test-remote HOST=192.168.1.200"; \
+		exit 1; \
+	fi
+	@echo "🧪 Testing Span panel at $(HOST) from $(DEPLOY_HOST)..."
+	ssh $(DEPLOY_HOST) "cd $(DEPLOY_CONFIG_PATH) && docker compose -f docker-compose.prod.yml --profile manual run --rm fetcher \
+		python scripts/manage_span_tokens.py test --host '$(HOST)'"
+
+span-delete-remote:  ## [remote] 🗑️  Delete a Span panel token (usage: make span-delete-remote SERIAL=xxx)
+	@if [ -z "$(SERIAL)" ]; then \
+		echo "❌ ERROR: SERIAL is required"; \
+		echo "Usage: make span-delete-remote SERIAL=<panel_serial>"; \
+		exit 1; \
+	fi
+	@echo "🗑️  Deleting Span panel token on $(DEPLOY_HOST)..."
+	ssh $(DEPLOY_HOST) "cd $(DEPLOY_CONFIG_PATH) && docker compose -f docker-compose.prod.yml --profile manual run --rm fetcher \
+		python scripts/manage_span_tokens.py delete --serial '$(SERIAL)'"
+
 format:  ## [local] ✨ Format code with isort and black
 	isort home_monitor/ scripts/
 	black home_monitor/ scripts/
@@ -263,18 +358,18 @@ rachio-backfill:  ## [local] 🌧️  Backfill Rachio watering events (usage: ma
 	@if [ -z "$(START_DATE)" ]; then \
 		echo "❌ ERROR: START_DATE is required"; \
 		echo ""; \
-		echo "Usage: make rachio-backfill START_DATE=2024-01-01 [END_DATE=2024-06-01] [SITE=FL] [DRY_RUN=1]"; \
+		echo "Usage: make rachio-backfill START_DATE=2024-01-01 [END_DATE=2024-06-01] [SITE=FOO] [DRY_RUN=1]"; \
 		echo ""; \
 		echo "Options:"; \
 		echo "  START_DATE  - Start date for backfill (YYYY-MM-DD format, required)"; \
 		echo "  END_DATE    - End date for backfill (optional, defaults to now)"; \
-		echo "  SITE        - Specific site to backfill (optional, e.g., FL)"; \
+		echo "  SITE        - Specific site to backfill (optional)"; \
 		echo "  DRY_RUN     - Show what would be done without making changes (optional)"; \
 		echo ""; \
 		echo "Examples:"; \
 		echo "  make rachio-backfill START_DATE=2024-01-01"; \
 		echo "  make rachio-backfill START_DATE=2024-01-01 END_DATE=2024-06-01"; \
-		echo "  make rachio-backfill START_DATE=2024-01-01 SITE=FL"; \
+		echo "  make rachio-backfill START_DATE=2024-01-01 SITE=FOO"; \
 		echo "  make rachio-backfill START_DATE=2024-01-01 DRY_RUN=1"; \
 		echo ""; \
 		echo "Note: The Rachio API does not document how far back events can be fetched."; \
@@ -405,19 +500,17 @@ db-restore-remote:  ## [remote] 📥 Restore database dump to remote host (run d
 
 deploy-build-remote:  ## [remote] 🔨 Build images on remote host without starting containers
 	@echo "Building on $(DEPLOY_HOST)..."
-	@docker --context $(DEPLOY_CONTEXT) info >/dev/null 2>&1 || \
-		(echo "❌ Cannot connect to remote Docker. Run 'make deploy-setup' first." && exit 1)
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) --profile manual --profile scheduled build
+	$(REMOTE_COMPOSE) --profile manual --profile scheduled build"
 	@echo ""
 	@echo "✅ Build complete. Start with: make deploy-remote"
 
 deploy-check-remote:  ## [remote] 🔍 Check remote Docker connection and running containers
 	@echo "Checking connection to $(DEPLOY_HOST)..."
-	@docker --context $(DEPLOY_CONTEXT) info --format 'Docker version: {{.ServerVersion}}' 2>/dev/null || \
-		(echo "❌ Cannot connect. Run 'make deploy-setup' first." && exit 1)
+	@ssh $(DEPLOY_HOST) "docker info --format 'Docker version: {{.ServerVersion}}'" || \
+		(echo "❌ Cannot connect via SSH." && exit 1)
 	@echo ""
 	@echo "Running containers:"
-	@docker --context $(DEPLOY_CONTEXT) ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+	@ssh $(DEPLOY_HOST) "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'"
 
 deploy-clean-remote:  ## [remote] 🧹 Remove Docker context for remote deployment
 	@docker context rm $(DEPLOY_CONTEXT) 2>/dev/null && \
@@ -430,13 +523,13 @@ deploy-disable-https-remote:  ## [remote] 🔓 Disable HTTPS on Grafana (switch 
 	@echo "📤 Syncing .env to remote..."
 	rsync -avz .env $(DEPLOY_HOST):$(DEPLOY_CONFIG_PATH)/
 	@echo "🔄 Recreating Grafana container..."
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) up -d --force-recreate grafana
+	$(REMOTE_COMPOSE) up -d --force-recreate grafana"
 	@echo ""
 	@echo "✅ HTTP restored! Access Grafana at: http://$(shell echo $(DEPLOY_HOST) | cut -d@ -f2):3000"
 
-deploy-enable-https-remote:  ## [remote] 🔒 Enable HTTPS on Grafana (generates certs if needed, restarts Grafana)
+deploy-enable-https-remote:  ## [remote] 🔒 Enable HTTPS on Grafana (generates certs if needed, restarts Grafana) (usage: make deploy-enable-https-remote [CERT_HOSTNAME=hostname])
 	@echo "🔒 Enabling HTTPS on remote Grafana..."
-	@ssh $(DEPLOY_HOST) "test -f $(DEPLOY_CONFIG_PATH)/certs/grafana.crt" || $(MAKE) deploy-generate-certs-remote
+	@ssh $(DEPLOY_HOST) "test -f $(DEPLOY_CONFIG_PATH)/certs/grafana.crt" || $(MAKE) deploy-generate-certs-remote $(if $(CERT_HOSTNAME),CERT_HOSTNAME=$(CERT_HOSTNAME))
 	@echo "📝 Setting GF_SERVER_PROTOCOL=https in local .env (for docker-compose)..."
 	@grep -q '^GF_SERVER_PROTOCOL=' .env 2>/dev/null && \
 		sed -i '' 's/^GF_SERVER_PROTOCOL=.*/GF_SERVER_PROTOCOL=https/' .env || \
@@ -444,7 +537,7 @@ deploy-enable-https-remote:  ## [remote] 🔒 Enable HTTPS on Grafana (generates
 	@echo "📤 Syncing .env to remote..."
 	rsync -avz .env $(DEPLOY_HOST):$(DEPLOY_CONFIG_PATH)/
 	@echo "🔄 Recreating Grafana container..."
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) up -d --force-recreate grafana
+	$(REMOTE_COMPOSE) up -d --force-recreate grafana"
 	@echo ""
 	@echo "✅ HTTPS enabled! Access Grafana at: https://$(shell echo $(DEPLOY_HOST) | cut -d@ -f2):3000"
 	@echo "   (You'll need to accept the self-signed certificate warning in your browser)"
@@ -456,7 +549,7 @@ deploy-exec-remote:  ## [remote] 🐚 Open shell in remote container (usage: mak
 		echo "Available services: postgres, grafana, fetcher-scheduled"; \
 		exit 1; \
 	fi
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) exec $(SERVICE) sh
+	ssh -t $(DEPLOY_HOST) "docker exec -it home-monitor-$(SERVICE) sh"
 
 deploy-fix-permissions-remote:  ## [remote] 🔧 Fix permissions on remote config directory (requires sudo)
 	@echo "🔧 Fixing permissions on $(DEPLOY_HOST):$(DEPLOY_CONFIG_PATH)..."
@@ -464,25 +557,43 @@ deploy-fix-permissions-remote:  ## [remote] 🔧 Fix permissions on remote confi
 	ssh -t $(DEPLOY_HOST) "sudo chown -R \$$USER:\$$USER $(DEPLOY_CONFIG_PATH)"
 	@echo "✅ Permissions fixed"
 
-deploy-generate-certs-remote:  ## [remote] 🔐 Generate self-signed TLS certificates for Grafana HTTPS
-	@echo "🔐 Generating self-signed certificates on $(DEPLOY_HOST)..."
+deploy-generate-certs-remote:  ## [remote] 🔐 Generate self-signed TLS certificates for Grafana HTTPS (usage: make deploy-generate-certs-remote [CERT_HOSTNAME=hostname])
+	$(eval CERT_CN := $(if $(CERT_HOSTNAME),$(CERT_HOSTNAME),$(shell echo $(DEPLOY_HOST) | cut -d@ -f2)))
+	@echo "🔐 Generating self-signed certificates on $(DEPLOY_HOST) for hostname '$(CERT_CN)'..."
 	ssh $(DEPLOY_HOST) "mkdir -p $(DEPLOY_CONFIG_PATH)/certs && \
 		openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
 		-keyout $(DEPLOY_CONFIG_PATH)/certs/grafana.key \
 		-out $(DEPLOY_CONFIG_PATH)/certs/grafana.crt \
-		-subj '/CN=$(shell echo $(DEPLOY_HOST) | cut -d@ -f2)/O=HomeMonitor/C=US' \
-		-addext 'subjectAltName=DNS:$(shell echo $(DEPLOY_HOST) | cut -d@ -f2),DNS:localhost' && \
+		-subj '/CN=$(CERT_CN)/O=HomeMonitor/C=US' \
+		-addext 'subjectAltName=DNS:$(CERT_CN),DNS:localhost' && \
 		chmod 644 $(DEPLOY_CONFIG_PATH)/certs/grafana.*"
 	@echo "✅ Certificates generated at $(DEPLOY_CONFIG_PATH)/certs/"
+	@echo "   CN/SAN: $(CERT_CN), localhost"
 
 deploy-pull-remote:  ## [remote] ⬇️  Pull latest images on remote host (if using registry)
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) pull
+	$(REMOTE_COMPOSE) pull"
 
-deploy-remote:  ## [remote] 🚀 Deploy to remote host (builds and starts containers)
+deploy:  ## [remote] 🚀 Full deploy: sync files, rebuild, and restart everything
+	@echo "🚀 Deploying to $(DEPLOY_HOST)..."
+	@echo ""
+	@echo "📤 Step 1: Syncing config files..."
+	@$(MAKE) deploy-sync-remote
+	@echo ""
+	@echo "🔨 Step 2: Rebuilding and restarting infrastructure..."
+	$(REMOTE_COMPOSE) up -d postgres grafana"
+	@echo ""
+	@echo "🔨 Step 3: Rebuilding and restarting fetcher..."
+	$(REMOTE_COMPOSE) --profile scheduled up -d --build fetcher-scheduled"
+	@echo ""
+	@echo "✅ Deployment complete!"
+	@echo ""
+	@echo "View logs:"
+	@echo "  make fetcher-logs-remote   # Fetcher logs"
+	@echo "  make infra-logs-remote     # All container logs"
+
+deploy-remote:  ## [remote] 🚀 Deploy to remote host (builds and starts containers, no sync)
 	@echo "Deploying to $(DEPLOY_HOST)..."
-	@docker --context $(DEPLOY_CONTEXT) info >/dev/null 2>&1 || \
-		(echo "❌ Cannot connect to remote Docker. Run 'make deploy-setup' first." && exit 1)
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) up -d --build
+	$(REMOTE_COMPOSE) up -d --build"
 	@echo ""
 	@echo "✅ Deployment complete. View logs with: make infra-logs-remote"
 
@@ -548,43 +659,40 @@ deploy-setup:  ## [remote] 🔧 One-time setup: create Docker context for remote
 	@ssh -t $(DEPLOY_HOST) "sudo mkdir -p $(DEPLOY_CONFIG_PATH)/grafana/provisioning && sudo chown -R \$$USER:\$$USER $(DEPLOY_CONFIG_PATH)"
 	@echo "✅ Config directory created at $(DEPLOY_CONFIG_PATH)"
 
-deploy-sync-remote:  ## [remote] 📤 Sync config files (.env, sites.json, grafana/, docker-compose.prod.yml) to remote host
-	@echo "📤 Syncing config files to $(DEPLOY_HOST)..."
-	@ssh $(DEPLOY_HOST) "mkdir -p $(DEPLOY_CONFIG_PATH)/grafana/provisioning"
-	rsync -avz --delete grafana/provisioning/ $(DEPLOY_HOST):$(DEPLOY_CONFIG_PATH)/grafana/provisioning/
-	rsync -avz docker-compose.prod.yml $(DEPLOY_HOST):$(DEPLOY_CONFIG_PATH)/
-	@echo "✅ Synced docker-compose.prod.yml"
-	@if [ -f sites.json ]; then \
-		rsync -avz sites.json $(DEPLOY_HOST):$(DEPLOY_CONFIG_PATH)/; \
-		echo "✅ Synced sites.json"; \
-	else \
-		echo "⚠️  sites.json not found, skipping"; \
-	fi
-	@if [ -f .env ]; then \
-		rsync -avz .env $(DEPLOY_HOST):$(DEPLOY_CONFIG_PATH)/; \
-		echo "✅ Synced .env"; \
-	else \
-		echo "⚠️  .env not found, skipping"; \
-	fi
+deploy-sync-remote:  ## [remote] 📤 Sync project files to remote host for building
+	@echo "📤 Syncing project to $(DEPLOY_HOST):$(DEPLOY_CONFIG_PATH)..."
+	@ssh $(DEPLOY_HOST) "mkdir -p $(DEPLOY_CONFIG_PATH)"
+	rsync -avz --delete \
+		--exclude '.git' \
+		--exclude '__pycache__' \
+		--exclude '*.pyc' \
+		--exclude '.pytest_cache' \
+		--exclude '.venv' \
+		--exclude 'venv' \
+		--exclude '.mypy_cache' \
+		--exclude 'assets' \
+		--exclude 'certs/*.crt' \
+		--exclude 'certs/*.key' \
+		./ $(DEPLOY_HOST):$(DEPLOY_CONFIG_PATH)/
 	@echo ""
-	@echo "✅ Config sync complete"
+	@echo "✅ Project sync complete"
 
 drop-db-remote:  ## [remote] 🗑️  Drop all database tables
 	@echo "🗑️  Dropping all database tables on $(DEPLOY_HOST)..."
-	@docker --context $(DEPLOY_CONTEXT) info >/dev/null 2>&1 || \
-		(echo "❌ Cannot connect to remote Docker. Run 'make deploy-setup' first." && exit 1)
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) exec postgres psql -U home_monitor -d home_monitor -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+	ssh $(DEPLOY_HOST) "docker exec home-monitor-db psql -U home_monitor -d home_monitor -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'"
 	@echo ""
 	@echo "✅ Database tables dropped on remote"
 
 fetcher-logs-remote:  ## [remote] 📋 View fetcher logs
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) --profile scheduled logs -f fetcher-scheduled
+	ssh $(DEPLOY_HOST) "docker logs -f home-monitor-fetcher-scheduled"
 
 fetcher-start-remote:  ## [remote] ⏰ Start scheduled fetcher
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) --profile scheduled up -d fetcher-scheduled
+	@echo "⏰ Starting scheduled fetcher on $(DEPLOY_HOST)..."
+	ssh $(DEPLOY_HOST) "cd $(DEPLOY_CONFIG_PATH) && docker compose -f docker-compose.prod.yml --profile scheduled up -d fetcher-scheduled"
 
 fetcher-stop-remote:  ## [remote] ⏹️  Stop scheduled fetcher
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) --profile scheduled stop fetcher-scheduled
+	@echo "⏹️  Stopping scheduled fetcher on $(DEPLOY_HOST)..."
+	ssh $(DEPLOY_HOST) "docker stop home-monitor-fetcher-scheduled || true"
 
 generate-dashboard-remote:  ## [remote] 📊 Generate and sync Grafana dashboard to remote
 	@PYTHONPATH=. python scripts/generate_dashboard.py
@@ -593,45 +701,41 @@ generate-dashboard-remote:  ## [remote] 📊 Generate and sync Grafana dashboard
 	@echo "✅ Dashboard synced. Refresh Grafana on remote to see changes."
 
 infra-down-remote:  ## [remote] ⬇️  Stop containers
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) down
+	$(REMOTE_COMPOSE) down"
 
 infra-logs-remote:  ## [remote] 📋 View logs from containers
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) logs -f
+	$(REMOTE_COMPOSE) logs -f"
 
 infra-ps-remote:  ## [remote] 📊 Show status of containers
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) ps
+	$(REMOTE_COMPOSE) ps"
 
 infra-restart-remote:  ## [remote] 🔄 Restart containers (no rebuild)
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) restart
+	$(REMOTE_COMPOSE) restart"
 
 infra-up-remote:  ## [remote] 🏗️  Start only postgres and grafana (no fetcher)
 	@echo "Starting infrastructure on $(DEPLOY_HOST)..."
-	@docker --context $(DEPLOY_CONTEXT) info >/dev/null 2>&1 || \
-		(echo "❌ Cannot connect to remote Docker. Run 'make deploy-setup' first." && exit 1)
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) up -d postgres grafana
+	$(REMOTE_COMPOSE) up -d postgres grafana"
 	@echo ""
 	@echo "✅ Infrastructure started. Postgres and Grafana are running."
 
 init-db-remote:  ## [remote] 🗄️  Initialize database schema
 	@echo "🗄️  Initializing database schema on $(DEPLOY_HOST)..."
-	@docker --context $(DEPLOY_CONTEXT) info >/dev/null 2>&1 || \
-		(echo "❌ Cannot connect to remote Docker. Run 'make deploy-setup' first." && exit 1)
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) --profile manual run --rm fetcher python -m home_monitor init-db
+	ssh $(DEPLOY_HOST) "cd $(DEPLOY_CONFIG_PATH) && docker compose -f docker-compose.prod.yml --profile manual run --rm fetcher \
+		python -m home_monitor init-db"
 	@echo ""
 	@echo "✅ Database initialized on remote"
 
 redeploy-fetcher-remote:  ## [remote] 🔄 Init DB, rebuild fetcher, and restart scheduled fetcher
 	@echo "🔄 Redeploying fetcher on $(DEPLOY_HOST)..."
-	@docker --context $(DEPLOY_CONTEXT) info >/dev/null 2>&1 || \
-		(echo "❌ Cannot connect to remote Docker. Run 'make deploy-setup' first." && exit 1)
 	@echo ""
 	@echo "📦 Step 1/3: Initializing database schema..."
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) --profile manual run --rm fetcher python -m home_monitor init-db
+	ssh $(DEPLOY_HOST) "cd $(DEPLOY_CONFIG_PATH) && docker compose -f docker-compose.prod.yml --profile manual run --rm fetcher \
+		python -m home_monitor init-db"
 	@echo ""
 	@echo "🔨 Step 2/3: Building fetcher image..."
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) --profile scheduled build fetcher-scheduled
+	ssh $(DEPLOY_HOST) "cd $(DEPLOY_CONFIG_PATH) && docker compose -f docker-compose.prod.yml --profile scheduled build fetcher-scheduled"
 	@echo ""
 	@echo "🚀 Step 3/3: Restarting scheduled fetcher..."
-	docker --context $(DEPLOY_CONTEXT) compose $(DEPLOY_COMPOSE) --profile scheduled up -d --force-recreate fetcher-scheduled
+	ssh $(DEPLOY_HOST) "cd $(DEPLOY_CONFIG_PATH) && docker compose -f docker-compose.prod.yml --profile scheduled up -d --force-recreate fetcher-scheduled"
 	@echo ""
 	@echo "✅ Fetcher redeployed! View logs with: make fetcher-logs-remote"

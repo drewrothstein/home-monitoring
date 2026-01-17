@@ -871,6 +871,176 @@ def test_iaqualink(
         return False, None
 
 
+def test_span(
+    location: Dict[str, Any], api_config: Dict[str, Any], save: bool = False
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """Test Span Panel API service. Returns (success, data)."""
+    from home_monitor.apis.span import SpanPanelClient
+    from home_monitor.database import (
+        get_span_panel_token_by_host,
+        insert_span_circuit_readings,
+        insert_span_panel_reading,
+    )
+
+    print_section("Testing Span Panel API")
+
+    # Get config
+    config = api_config.get("config", {})
+    if isinstance(config, str):
+        config = json.loads(config)
+
+    panel_host = config.get("panel_host")
+    panel_name = config.get("panel_name", panel_host)
+
+    if not panel_host:
+        print("❌ ERROR: Span panel_host not configured")
+        return False, None
+
+    print(f"Location: {location['name']}")
+    print(f"Panel Host: {panel_host}")
+    print(f"Panel Name: {panel_name}")
+
+    # Get token from database
+    token_data = get_span_panel_token_by_host(panel_host)
+    if not token_data:
+        print(f"\n⚠️  No token found for panel at {panel_host}")
+        print("   Testing without authentication (status endpoint only)...")
+        print(f"   To register: make span-register HOST={panel_host}")
+        token = None
+    else:
+        token = token_data.get("token")
+        print(f"Panel Serial: {token_data.get('panel_serial')}")
+
+    try:
+        # Fetch data
+        print("\n📡 Fetching data from Span Panel...")
+        client = SpanPanelClient(
+            panel_host=panel_host,
+            token=token,
+            panel_name=panel_name,
+        )
+
+        # Check connectivity first
+        if not client.check_connection():
+            print(f"\n❌ ERROR: Cannot reach panel at {panel_host}")
+            return False, None
+
+        # Get panel data
+        data = client.fetch_current_data()
+
+        # Display normalized panel data
+        print_section("Panel Data")
+        print_data("Timestamp", data.get("timestamp"))
+        print_data("Panel Serial", data.get("panel_serial"))
+        print("\nPower Data:")
+        print_data("  Grid Power (W)", data.get("instant_grid_power_w"))
+        print_data("  Feedthrough Power (W)", data.get("feedthrough_power_w"))
+        print("\nPanel State:")
+        print_data("  Main Relay", data.get("main_relay_state"))
+        print_data("  DSM Grid State", data.get("dsm_grid_state"))
+        print_data("  DSM State", data.get("dsm_state"))
+        print_data("  Run Config", data.get("current_run_config"))
+        print("\nSystem Info:")
+        print_data("  Door State", data.get("door_state"))
+        print_data("  Firmware", data.get("firmware_version"))
+        print_data("  Uptime (seconds)", data.get("uptime_seconds"))
+        print("\nNetwork:")
+        print_data("  Ethernet", "Connected" if data.get("eth0_link") else "Disconnected")
+        print_data("  WiFi", "Connected" if data.get("wlan_link") else "Disconnected")
+        print_data("  Cellular", "Connected" if data.get("wwan_link") else "Disconnected")
+        if data.get("battery_soe_percent") is not None:
+            print("\nBattery:")
+            print_data("  State of Charge (%)", data.get("battery_soe_percent"))
+
+        # Get circuit data if we have a token
+        circuits = []
+        if token:
+            try:
+                circuits = client.fetch_circuit_data()
+                print_section("Circuit Summary")
+                print(f"Total circuits: {len(circuits)}")
+
+                if circuits:
+                    # Calculate totals and show top circuits
+                    total_power = sum(c.get("instant_power_w", 0) or 0 for c in circuits)
+                    print(f"Total circuit power: {total_power:.1f}W")
+
+                    # Sort by power and show top 10
+                    sorted_circuits = sorted(
+                        circuits,
+                        key=lambda c: abs(c.get("instant_power_w", 0) or 0),
+                        reverse=True,
+                    )
+
+                    print("\nTop 10 circuits by power:")
+                    for i, c in enumerate(sorted_circuits[:10]):
+                        name = c.get("circuit_name", c.get("circuit_id", "?"))
+                        power = c.get("instant_power_w", 0) or 0
+                        state = c.get("relay_state", "?")
+                        priority = c.get("priority", "?")
+                        print(f"  {i + 1:2}. {name:<25} {power:>8.1f}W  [{state}, {priority}]")
+            except Exception as e:
+                print(f"\n⚠️  Could not fetch circuit data: {e}")
+
+        # Add circuits to data for display
+        data["circuits"] = circuits
+        data["circuit_count"] = len(circuits)
+
+        # Save to database if requested
+        if save:
+            if location.get("id") == 0:
+                print("❌ ERROR: Cannot save to database - no valid location ID")
+                print("   Use database location or set DATABASE_URL")
+                return False, data
+
+            print_section("Saving to Database")
+            panel_serial = data.get("panel_serial")
+            if not panel_serial:
+                print("⚠ Cannot save: panel serial not available")
+            else:
+                # Save panel reading
+                if data.get("instant_grid_power_w") is not None:
+                    reading_id = insert_span_panel_reading(
+                        location_id=location["id"],
+                        panel_serial=panel_serial,
+                        timestamp=data["timestamp"],
+                        instant_grid_power_w=data.get("instant_grid_power_w"),
+                        feedthrough_power_w=data.get("feedthrough_power_w"),
+                        main_relay_state=data.get("main_relay_state"),
+                        dsm_grid_state=data.get("dsm_grid_state"),
+                        dsm_state=data.get("dsm_state"),
+                        current_run_config=data.get("current_run_config"),
+                        door_state=data.get("door_state"),
+                        firmware_version=data.get("firmware_version"),
+                        uptime_seconds=data.get("uptime_seconds"),
+                        battery_soe_percent=data.get("battery_soe_percent"),
+                        eth0_link=data.get("eth0_link"),
+                        wlan_link=data.get("wlan_link"),
+                        wwan_link=data.get("wwan_link"),
+                        source="span",
+                        raw_data=data.get("raw_data"),
+                    )
+                    print(f"✓ Saved panel reading (ID: {reading_id})")
+
+                # Save circuit readings
+                if circuits:
+                    count = insert_span_circuit_readings(
+                        location_id=location["id"],
+                        panel_serial=panel_serial,
+                        timestamp=data["timestamp"],
+                        circuits=circuits,
+                        source="span",
+                    )
+                    print(f"✓ Saved {count} circuit readings")
+
+        return True, data
+
+    except Exception as e:
+        print(f"\n❌ ERROR: {e}")
+        logger.exception("Error testing Span API")
+        return False, None
+
+
 def show_raw_data(data: Dict[str, Any], show_raw: bool = True):
     """Display raw API response data."""
     if not show_raw:
@@ -890,6 +1060,7 @@ def find_location_and_config(
     energy_site_id: Optional[str] = None,
     system_id: Optional[int] = None,
     device_id: Optional[str] = None,
+    panel_host: Optional[str] = None,
     require_db: bool = True,
 ) -> tuple:
     """
@@ -904,6 +1075,7 @@ def find_location_and_config(
         energy_site_id: Optional energy site ID for testing without database (overrides config)
         system_id: Optional system ID for testing without database (overrides config)
         device_id: Optional device ID for testing without database (Flume/Rachio)
+        panel_host: Optional panel host for testing Span panel
         require_db: If False, allow testing without database when required params are provided
 
     Returns:
@@ -1072,6 +1244,33 @@ def find_location_and_config(
                 "device_name": device_name_from_config,
             },
         }
+    elif service_name == "span":
+        # Span panel - get first panel from config or use --panel-host
+        span_config = site_config.get("span", {})
+        panels = span_config.get("panels", [])
+        panel_host_from_config = None
+        panel_name_from_config = None
+        if panels:
+            first_panel = panels[0]
+            panel_host_from_config = first_panel.get("host")
+            panel_name_from_config = first_panel.get("name", panel_host_from_config)
+        # Allow --panel-host to override config
+        effective_panel_host = panel_host or panel_host_from_config
+        effective_panel_name = panel_name_from_config or effective_panel_host
+        if not effective_panel_host:
+            print(f"❌ ERROR: Span panel not configured for site '{site_name}'")
+            print("   Either add span config to sites.json or use --panel-host")
+            return None, None
+        mock_config = {
+            "id": 0,
+            "location_id": 0,
+            "api_type": "span",
+            "enabled": True,
+            "config": {
+                "panel_host": effective_panel_host,
+                "panel_name": effective_panel_name,
+            },
+        }
     else:
         print(f"❌ ERROR: Unknown service: {service_name}")
         return None, None
@@ -1135,6 +1334,7 @@ Examples:
             "rachio",
             "tankutility",
             "iaqualink",
+            "span",
         ],
         help="Service to test",
     )
@@ -1184,6 +1384,11 @@ Examples:
         type=str,
         help="Device ID for testing without database (Flume/Rachio only)",
     )
+    parser.add_argument(
+        "--panel-host",
+        type=str,
+        help="Panel host for testing Span panel",
+    )
 
     args = parser.parse_args()
 
@@ -1199,6 +1404,7 @@ Examples:
         energy_site_id=args.energy_site_id,
         system_id=args.system_id,
         device_id=args.device_id,
+        panel_host=args.panel_host,
         require_db=require_db,
     )
     if not location or not api_config:
@@ -1226,6 +1432,8 @@ Examples:
             success, data = test_tankutility(location, api_config, args.save)
         elif args.service == "iaqualink":
             success, data = test_iaqualink(location, api_config, args.save)
+        elif args.service == "span":
+            success, data = test_span(location, api_config, args.save)
 
         # Show raw data if requested and available
         if success and data:

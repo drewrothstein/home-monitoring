@@ -43,6 +43,14 @@
       "iaqualink": {
         "serial_number": "your_pool_controller_serial",
         "device_name": "Pool Controller"
+      },
+      "span": {
+        "panels": [
+          {
+            "host": "192.168.1.200",
+            "name": "Main Panel"
+          }
+        ]
       }
     }
   }

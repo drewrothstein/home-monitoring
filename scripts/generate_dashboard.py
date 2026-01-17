@@ -901,6 +901,199 @@ FROM system_readings sr
 WHERE sr.timestamp >= $__timeFrom() AND sr.timestamp <= $__timeTo()
 ORDER BY "time" """
 
+# =============================================================================
+# SPAN PANEL SQL QUERIES
+# =============================================================================
+
+SQL_SPAN_GRID_POWER = """SELECT
+  spr.timestamp AS "time",
+  COALESCE(spt.panel_name, spr.panel_serial) AS metric,
+  spr.instant_grid_power_w / 1000.0 AS "Grid Power (kW)"
+FROM span_panel_readings spr
+JOIN locations l ON spr.location_id = l.id
+LEFT JOIN span_panel_tokens spt ON spr.panel_serial = spt.panel_serial
+WHERE spr.timestamp >= $__timeFrom() AND spr.timestamp <= $__timeTo()
+  AND l.name IN ($location)
+ORDER BY "time" """
+
+SQL_SPAN_FEEDTHROUGH_POWER = """SELECT
+  spr.timestamp AS "time",
+  COALESCE(spt.panel_name, spr.panel_serial) AS metric,
+  spr.feedthrough_power_w / 1000.0 AS "Feedthrough Power (kW)"
+FROM span_panel_readings spr
+JOIN locations l ON spr.location_id = l.id
+LEFT JOIN span_panel_tokens spt ON spr.panel_serial = spt.panel_serial
+WHERE spr.timestamp >= $__timeFrom() AND spr.timestamp <= $__timeTo()
+  AND l.name IN ($location)
+ORDER BY "time" """
+
+SQL_SPAN_CURRENT_GRID_POWER = """WITH latest AS (
+  SELECT panel_serial, MAX(timestamp) as latest_time
+  FROM span_panel_readings spr
+  JOIN locations l ON spr.location_id = l.id
+  WHERE l.name IN ($location)
+  GROUP BY panel_serial
+)
+SELECT
+  COALESCE(spt.panel_name, spr.panel_serial) AS metric,
+  spr.instant_grid_power_w / 1000.0 AS "Grid Power (kW)"
+FROM span_panel_readings spr
+JOIN latest ON spr.panel_serial = latest.panel_serial AND spr.timestamp = latest.latest_time
+LEFT JOIN span_panel_tokens spt ON spr.panel_serial = spt.panel_serial"""
+
+SQL_SPAN_PANEL_STATUS = """WITH latest AS (
+  SELECT panel_serial, MAX(timestamp) as latest_time
+  FROM span_panel_readings spr
+  JOIN locations l ON spr.location_id = l.id
+  WHERE l.name IN ($location)
+  GROUP BY panel_serial
+)
+SELECT
+  COALESCE(spt.panel_name, spr.panel_serial) AS "Panel",
+  spr.main_relay_state AS "Main Relay",
+  spr.dsm_grid_state AS "Grid State",
+  spr.door_state AS "Door",
+  CASE
+    WHEN spr.eth0_link THEN 'Ethernet'
+    WHEN spr.wlan_link THEN 'WiFi'
+    WHEN spr.wwan_link THEN 'Cellular'
+    ELSE 'None'
+  END AS "Network",
+  spr.firmware_version AS "Firmware",
+  ROUND(spr.uptime_seconds / 86400.0, 1) || ' days' AS "Uptime"
+FROM span_panel_readings spr
+JOIN latest ON spr.panel_serial = latest.panel_serial AND spr.timestamp = latest.latest_time
+LEFT JOIN span_panel_tokens spt ON spr.panel_serial = spt.panel_serial"""
+
+
+def sql_span_battery_soc(panel_index: int) -> str:
+    """Generate SQL for Span battery state of charge by panel index.
+
+    Returns time_series format with metric column for dynamic series naming.
+    """
+    panel_num = panel_index + 1
+    return f"""-- Span Battery {panel_num}: Get the latest reading for panel at index {panel_index}
+-- Uses ROW_NUMBER to identify panels by order of panel_serial
+-- Returns time_series format so metric column becomes the series name
+WITH latest AS (
+  SELECT panel_serial, MAX(timestamp) as latest_time
+  FROM span_panel_readings spr
+  JOIN locations l ON spr.location_id = l.id
+  WHERE l.name IN ($location)
+  GROUP BY panel_serial
+),
+panel_rankings AS (
+  SELECT
+    spr.panel_serial,
+    spr.timestamp as "time",
+    COALESCE(spt.panel_name, spr.panel_serial) AS metric,
+    spr.battery_soe_percent AS "Battery SOC",
+    ROW_NUMBER() OVER (ORDER BY spr.panel_serial) as panel_rn
+  FROM span_panel_readings spr
+  JOIN latest ON spr.panel_serial = latest.panel_serial AND spr.timestamp = latest.latest_time
+  LEFT JOIN span_panel_tokens spt ON spr.panel_serial = spt.panel_serial
+)
+SELECT "time", metric, "Battery SOC"
+FROM panel_rankings
+WHERE panel_rn = {panel_num}"""
+
+
+SQL_SPAN_TOP_CIRCUITS_BY_POWER = """WITH latest AS (
+  SELECT panel_serial, MAX(timestamp) as latest_time
+  FROM span_circuit_readings scr
+  JOIN locations l ON scr.location_id = l.id
+  WHERE l.name IN ($location)
+  GROUP BY panel_serial
+),
+ranked AS (
+  SELECT
+    scr.circuit_name AS metric,
+    scr.instant_power_w AS "Power (W)",
+    ROW_NUMBER() OVER (PARTITION BY scr.panel_serial ORDER BY ABS(scr.instant_power_w) DESC) as rn
+  FROM span_circuit_readings scr
+  JOIN latest ON scr.panel_serial = latest.panel_serial AND scr.timestamp = latest.latest_time
+)
+SELECT metric, "Power (W)"
+FROM ranked
+WHERE rn <= 10
+ORDER BY ABS("Power (W)") DESC"""
+
+SQL_SPAN_CIRCUIT_POWER_TIMESERIES = """SELECT
+  scr.timestamp AS "time",
+  scr.circuit_name AS metric,
+  scr.instant_power_w AS "Power (W)"
+FROM span_circuit_readings scr
+JOIN locations l ON scr.location_id = l.id
+WHERE scr.timestamp >= $__timeFrom() AND scr.timestamp <= $__timeTo()
+  AND l.name IN ($location)
+ORDER BY "time" """
+
+SQL_SPAN_TOTAL_CIRCUIT_POWER = """SELECT
+  scr.timestamp AS "time",
+  COALESCE(spt.panel_name, scr.panel_serial) AS metric,
+  SUM(scr.instant_power_w) / 1000.0 AS "Total Circuit Power (kW)"
+FROM span_circuit_readings scr
+JOIN locations l ON scr.location_id = l.id
+LEFT JOIN span_panel_tokens spt ON scr.panel_serial = spt.panel_serial
+WHERE scr.timestamp >= $__timeFrom() AND scr.timestamp <= $__timeTo()
+  AND l.name IN ($location)
+GROUP BY scr.timestamp, scr.panel_serial, spt.panel_name
+ORDER BY "time" """
+
+SQL_SPAN_CIRCUIT_ENERGY_DAILY = """WITH daily_energy AS (
+  SELECT
+    DATE(scr.timestamp) as day,
+    scr.circuit_name,
+    MAX(scr.import_energy_wh) - MIN(scr.import_energy_wh) AS energy_wh
+  FROM span_circuit_readings scr
+  JOIN locations l ON scr.location_id = l.id
+  WHERE scr.timestamp >= $__timeFrom() AND scr.timestamp <= $__timeTo()
+    AND l.name IN ($location)
+  GROUP BY DATE(scr.timestamp), scr.circuit_name
+)
+SELECT
+  day AS "time",
+  circuit_name AS metric,
+  energy_wh / 1000.0 AS "Energy (kWh)"
+FROM daily_energy
+ORDER BY day, energy_wh DESC"""
+
+SQL_SPAN_TOP_ENERGY_CONSUMERS = """WITH energy_totals AS (
+  SELECT
+    scr.circuit_name,
+    MAX(scr.import_energy_wh) - MIN(scr.import_energy_wh) AS energy_wh
+  FROM span_circuit_readings scr
+  JOIN locations l ON scr.location_id = l.id
+  WHERE scr.timestamp >= $__timeFrom() AND scr.timestamp <= $__timeTo()
+    AND l.name IN ($location)
+  GROUP BY scr.circuit_name
+)
+SELECT
+  circuit_name AS metric,
+  energy_wh / 1000.0 AS "Energy (kWh)"
+FROM energy_totals
+WHERE energy_wh > 0
+ORDER BY energy_wh DESC
+LIMIT 10"""
+
+SQL_SPAN_CIRCUIT_TABLE = """WITH latest AS (
+  SELECT panel_serial, MAX(timestamp) as latest_time
+  FROM span_circuit_readings scr
+  JOIN locations l ON scr.location_id = l.id
+  WHERE l.name IN ($location)
+  GROUP BY panel_serial
+)
+SELECT
+  scr.circuit_name AS "Circuit",
+  ROUND(scr.instant_power_w::numeric, 1) AS "Power (W)",
+  ROUND((scr.import_energy_wh / 1000.0)::numeric, 2) AS "Import (kWh)",
+  ROUND((scr.export_energy_wh / 1000.0)::numeric, 2) AS "Export (kWh)",
+  scr.relay_state AS "Relay",
+  scr.priority AS "Priority"
+FROM span_circuit_readings scr
+JOIN latest ON scr.panel_serial = latest.panel_serial AND scr.timestamp = latest.latest_time
+ORDER BY ABS(scr.instant_power_w) DESC"""
+
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -1189,8 +1382,16 @@ def stat_panel(
     graph_mode: str = "area",
     description: str = "",
     overrides: list[dict] | None = None,
+    text_mode: str = "auto",
+    query_format: str = "table",
 ) -> dict[str, Any]:
-    """Create a stat panel."""
+    """Create a stat panel.
+
+    Args:
+        text_mode: Display mode - "auto", "value", "value_and_name", "name", or "none"
+        query_format: Query format - "table" or "time_series". Use "time_series" with
+            a metric column to show the metric value as the series name.
+    """
     field_config: dict[str, Any] = {
         "defaults": {
             "color": {"mode": "thresholds"},
@@ -1219,7 +1420,7 @@ def stat_panel(
             {
                 "datasource": DATASOURCE,
                 "editorMode": "code",
-                "format": "table",
+                "format": query_format,
                 "rawQuery": True,
                 "rawSql": sql,
                 "refId": "A",
@@ -1232,7 +1433,7 @@ def stat_panel(
             "justifyMode": "auto",
             "orientation": "auto",
             "reduceOptions": {"values": False, "calcs": ["lastNotNull"], "fields": ""},
-            "textMode": "auto",
+            "textMode": text_mode,
         },
     }
 
@@ -1250,8 +1451,11 @@ def bar_gauge_panel(
     unit: str = "kwatt",
     description: str = "",
     overrides: list[dict] | None = None,
+    query_format: str = "time_series",
 ) -> dict[str, Any]:
     """Create a bar gauge panel."""
+    # For table format, use each row as a separate bar; for time_series, reduce to calcs
+    use_all_values = query_format == "table"
     return {
         "id": panel_id,
         "gridPos": {"h": pos.h, "w": pos.w, "x": pos.x, "y": pos.y},
@@ -1262,7 +1466,7 @@ def bar_gauge_panel(
             {
                 "datasource": DATASOURCE,
                 "editorMode": "code",
-                "format": "time_series",
+                "format": query_format,
                 "rawQuery": True,
                 "rawSql": sql,
                 "refId": "A",
@@ -1296,7 +1500,11 @@ def bar_gauge_panel(
             "minVizWidth": 8,
             "namePlacement": "auto",
             "orientation": "horizontal",
-            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+            "reduceOptions": {
+                "calcs": ["lastNotNull"],
+                "fields": "",
+                "values": use_all_values,
+            },
             "showUnfilled": True,
             "sizing": "auto",
             "valueMode": "color",
@@ -2937,6 +3145,393 @@ def create_panels() -> list[dict[str, Any]]:
     )
 
     # ==========================================================================
+    # Span Panel Section (Row Header + Panels)
+    # ==========================================================================
+
+    # Span Section Row Header
+    panels.append(
+        {
+            "id": 80,
+            "gridPos": {"h": 1, "w": 24, "x": 0, "y": 92},
+            "type": "row",
+            "title": "Span Electrical Panel(s)",
+            "collapsed": False,
+        }
+    )
+
+    # Row 1: Panel Overview - Grid Power, Feedthrough, Status, Battery
+    panels.append(
+        power_timeseries(
+            title="Span Grid Power",
+            sql=SQL_SPAN_GRID_POWER,
+            pos=GridPos(h=8, w=8, x=0, y=93),
+            panel_id=81,
+            description="Total grid power measured by Span panel (positive = importing, negative = exporting).",
+            legend_calcs=LEGEND_CALCS_STANDARD,
+        )
+    )
+
+    panels.append(
+        power_timeseries(
+            title="Span Feedthrough Power",
+            sql=SQL_SPAN_FEEDTHROUGH_POWER,
+            pos=GridPos(h=8, w=8, x=8, y=93),
+            panel_id=82,
+            description="Power flowing through non-Span breakers (not individually monitored).",
+            legend_calcs=LEGEND_CALCS_STANDARD,
+        )
+    )
+
+    # Panel Status Table
+    panels.append(
+        {
+            "id": 83,
+            "gridPos": {"h": 4, "w": 8, "x": 16, "y": 93},
+            "type": "table",
+            "title": "Panel Status",
+            "targets": [
+                {
+                    "datasource": DATASOURCE,
+                    "editorMode": "code",
+                    "format": "table",
+                    "rawQuery": True,
+                    "rawSql": SQL_SPAN_PANEL_STATUS,
+                    "refId": "A",
+                },
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "color": {"mode": "thresholds"},
+                    "custom": {"align": "auto", "displayMode": "auto"},
+                    "mappings": [],
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [{"color": GREEN, "value": None}],
+                    },
+                },
+                "overrides": [
+                    {
+                        "matcher": {"id": "byName", "options": "Main Relay"},
+                        "properties": [
+                            {
+                                "id": "mappings",
+                                "value": [
+                                    {
+                                        "options": {"CLOSED": {"color": GREEN, "text": "CLOSED"}},
+                                        "type": "value",
+                                    },
+                                    {
+                                        "options": {"OPEN": {"color": RED, "text": "OPEN"}},
+                                        "type": "value",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "matcher": {"id": "byName", "options": "Door"},
+                        "properties": [
+                            {
+                                "id": "mappings",
+                                "value": [
+                                    {
+                                        "options": {"CLOSED": {"color": GREEN, "text": "CLOSED"}},
+                                        "type": "value",
+                                    },
+                                    {
+                                        "options": {"OPEN": {"color": YELLOW, "text": "OPEN"}},
+                                        "type": "value",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+            "options": {
+                "showHeader": True,
+                "cellHeight": "sm",
+                "footer": {"show": False},
+            },
+        }
+    )
+
+    # Battery SOC (if available) - two panels for multiple Span panels
+    # Uses text_mode="value_and_name" to display the panel name from the database
+    span_battery_thresholds = [
+        threshold(RED),
+        threshold(YELLOW, 20),
+        threshold(GREEN, 80),
+    ]
+
+    panels.append(
+        stat_panel(
+            title="Battery SOC",
+            sql=sql_span_battery_soc(0),
+            pos=GridPos(h=4, w=4, x=16, y=97),
+            panel_id=84,
+            thresholds=span_battery_thresholds,
+            unit="percent",
+            min_val=0,
+            max_val=100,
+            text_mode="value_and_name",
+            query_format="time_series",
+        )
+    )
+
+    panels.append(
+        stat_panel(
+            title="Battery SOC",
+            sql=sql_span_battery_soc(1),
+            pos=GridPos(h=4, w=4, x=20, y=97),
+            panel_id=95,
+            thresholds=span_battery_thresholds,
+            unit="percent",
+            min_val=0,
+            max_val=100,
+            text_mode="value_and_name",
+            query_format="time_series",
+        )
+    )
+
+    # Row 2: Circuit Power Distribution
+    panels.append(
+        {
+            "id": 85,
+            "gridPos": {"h": 8, "w": 8, "x": 0, "y": 101},
+            "type": "bargauge",
+            "title": "Top 10 Circuits by Power",
+            "description": "Top 10 circuits by absolute power consumption.",
+            "targets": [
+                {
+                    "datasource": DATASOURCE,
+                    "editorMode": "code",
+                    "format": "table",
+                    "rawQuery": True,
+                    "rawSql": SQL_SPAN_TOP_CIRCUITS_BY_POWER,
+                    "refId": "A",
+                }
+            ],
+            "transformations": [
+                {
+                    "id": "rowsToFields",
+                    "options": {
+                        "mappings": [
+                            {"fieldName": "metric", "handlerKey": "field.name"},
+                            {"fieldName": "Power (W)", "handlerKey": "field.value"},
+                        ]
+                    },
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "color": {"mode": "continuous-GrYlRd"},
+                    "mappings": [],
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {"color": GREEN, "value": 0},
+                            {"color": RED, "value": 80},
+                        ],
+                    },
+                    "unit": "watt",
+                },
+                "overrides": [],
+            },
+            "options": {
+                "displayMode": "lcd",
+                "legend": {
+                    "calcs": [],
+                    "displayMode": "list",
+                    "placement": "bottom",
+                    "showLegend": False,
+                },
+                "maxVizHeight": 300,
+                "minVizHeight": 16,
+                "minVizWidth": 8,
+                "namePlacement": "auto",
+                "orientation": "horizontal",
+                "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": True},
+                "showUnfilled": True,
+                "sizing": "auto",
+                "valueMode": "color",
+            },
+            "pluginVersion": "12.3.1",
+        }
+    )
+
+    panels.append(
+        power_timeseries(
+            title="Total Circuit Power",
+            sql=SQL_SPAN_TOTAL_CIRCUIT_POWER,
+            pos=GridPos(h=8, w=8, x=8, y=101),
+            panel_id=86,
+            description="Sum of all circuit power readings over time.",
+            legend_calcs=LEGEND_CALCS_STANDARD,
+        )
+    )
+
+    # Top Energy Consumers Pie Chart
+    panels.append(
+        {
+            "id": 87,
+            "gridPos": {"h": 8, "w": 8, "x": 16, "y": 101},
+            "type": "piechart",
+            "title": "Top Energy Consumers",
+            "description": "Top 10 circuits by total energy consumption in selected time range.",
+            "targets": [
+                {
+                    "datasource": DATASOURCE,
+                    "editorMode": "code",
+                    "format": "table",
+                    "rawQuery": True,
+                    "rawSql": SQL_SPAN_TOP_ENERGY_CONSUMERS,
+                    "refId": "A",
+                },
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "color": {"mode": "palette-classic"},
+                    "mappings": [],
+                    "unit": "kWh",
+                },
+                "overrides": [],
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "right",
+                    "showLegend": True,
+                    "values": ["value", "percent"],
+                },
+                "pieType": "pie",
+                "reduceOptions": {
+                    "calcs": ["lastNotNull"],
+                    "fields": "",
+                    "values": False,
+                },
+                "tooltip": {"mode": "single", "sort": "none"},
+            },
+        }
+    )
+
+    # Row 3: Circuit Details Table
+    panels.append(
+        {
+            "id": 88,
+            "gridPos": {"h": 10, "w": 24, "x": 0, "y": 109},
+            "type": "table",
+            "title": "Circuit Details",
+            "description": "Current status and readings for all circuits.",
+            "targets": [
+                {
+                    "datasource": DATASOURCE,
+                    "editorMode": "code",
+                    "format": "table",
+                    "rawQuery": True,
+                    "rawSql": SQL_SPAN_CIRCUIT_TABLE,
+                    "refId": "A",
+                },
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "color": {"mode": "thresholds"},
+                    "custom": {"align": "auto", "displayMode": "auto"},
+                    "mappings": [],
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [{"color": GREEN, "value": None}],
+                    },
+                },
+                "overrides": [
+                    {
+                        "matcher": {"id": "byName", "options": "Power (W)"},
+                        "properties": [
+                            {"id": "unit", "value": "watt"},
+                            {
+                                "id": "custom.displayMode",
+                                "value": "gradient-gauge",
+                            },
+                            {"id": "min", "value": 0},
+                            {"id": "max", "value": 5000},
+                        ],
+                    },
+                    {
+                        "matcher": {"id": "byName", "options": "Import (kWh)"},
+                        "properties": [
+                            {"id": "unit", "value": "kWh"},
+                        ],
+                    },
+                    {
+                        "matcher": {"id": "byName", "options": "Export (kWh)"},
+                        "properties": [
+                            {"id": "unit", "value": "kWh"},
+                        ],
+                    },
+                    {
+                        "matcher": {"id": "byName", "options": "Relay"},
+                        "properties": [
+                            {
+                                "id": "mappings",
+                                "value": [
+                                    {
+                                        "options": {"CLOSED": {"color": GREEN, "text": "ON"}},
+                                        "type": "value",
+                                    },
+                                    {
+                                        "options": {"OPEN": {"color": RED, "text": "OFF"}},
+                                        "type": "value",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "matcher": {"id": "byName", "options": "Priority"},
+                        "properties": [
+                            {
+                                "id": "mappings",
+                                "value": [
+                                    {
+                                        "options": {
+                                            "MUST_HAVE": {"color": RED, "text": "Must Have"}
+                                        },
+                                        "type": "value",
+                                    },
+                                    {
+                                        "options": {
+                                            "NICE_TO_HAVE": {
+                                                "color": YELLOW,
+                                                "text": "Nice to Have",
+                                            }
+                                        },
+                                        "type": "value",
+                                    },
+                                    {
+                                        "options": {
+                                            "NOT_ESSENTIAL": {
+                                                "color": GREEN,
+                                                "text": "Not Essential",
+                                            }
+                                        },
+                                        "type": "value",
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+            "options": {
+                "showHeader": True,
+                "cellHeight": "sm",
+                "footer": {"show": False},
+                "sortBy": [{"displayName": "Power (W)", "desc": True}],
+            },
+        }
+    )
+
+    # ==========================================================================
     # Debug Section (Row Header + Panels)
     # ==========================================================================
 
@@ -2944,7 +3539,7 @@ def create_panels() -> list[dict[str, Any]]:
     panels.append(
         {
             "id": 39,
-            "gridPos": {"h": 1, "w": 24, "x": 0, "y": 92},
+            "gridPos": {"h": 1, "w": 24, "x": 0, "y": 119},
             "type": "row",
             "title": "Debug",
             "collapsed": False,
@@ -2956,7 +3551,7 @@ def create_panels() -> list[dict[str, Any]]:
         bar_gauge_panel(
             title="Irradiance Sources Comparison",
             sql=SQL_IRRADIANCE_COMPARISON,
-            pos=GridPos(h=8, w=12, x=0, y=93),
+            pos=GridPos(h=8, w=12, x=0, y=120),
             panel_id=8,
             unit="W / m^2",
             description="Compare OpenWeather (forecast/model) vs Tempest (actual measured) irradiance data.",
@@ -2986,6 +3581,7 @@ def create_dashboard() -> dict[str, Any]:
             "irrigation",
             "propane",
             "pool",
+            "span",
             "system",
         ],
         "style": "dark",

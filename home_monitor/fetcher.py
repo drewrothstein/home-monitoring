@@ -22,6 +22,7 @@ from home_monitor.config import (
     get_iaqualink_credentials,
     get_openweather_api_key,
     get_rachio_credentials,
+    get_span_circuit_fetch_interval_minutes,
     get_tankutility_credentials,
     get_tempest_credentials,
     get_tesla_credentials,
@@ -30,6 +31,8 @@ from home_monitor.database import (
     get_battery_bank,
     get_battery_banks_by_energy_site,
     get_enphase_gateway_token,
+    get_last_span_circuit_reading_time,
+    get_span_panel_token_by_host,
     get_sprinkler_run_exists,
     init_database,
     insert_battery_reading,
@@ -39,9 +42,12 @@ from home_monitor.database import (
     insert_pool_reading,
     insert_power_reading,
     insert_propane_reading,
+    insert_span_circuit_readings,
+    insert_span_panel_reading,
     insert_sprinkler_run,
     insert_system_reading,
     insert_water_reading,
+    upsert_span_panel_token,
 )
 from home_monitor.site_config import (
     ensure_site_in_database,
@@ -950,6 +956,169 @@ def fetch_iaqualink_data(site_name: str, site_config: dict, location_id: int):
         logger.error(f"[iAqualink] Error fetching data for {site_name}: {e}", exc_info=True)
 
 
+def fetch_span_data(site_name: str, site_config: dict, location_id: int):
+    """
+    Fetch data from Span Power Panel local APIs and store in database.
+
+    Panel-level data is fetched every cycle. Circuit-level data is fetched
+    at a configurable interval (default: 15 minutes) to reduce storage.
+
+    Args:
+        site_name: Site name (e.g., "NY", "FL")
+        site_config: Site configuration dictionary
+        location_id: Database location ID
+    """
+    from datetime import timedelta
+
+    from home_monitor.apis.span import SpanPanelClient
+
+    try:
+        # Check if Span is configured for this site
+        span_config = site_config.get("span")
+        if not span_config:
+            logger.debug(f"[Span] Not configured for site {site_name}")
+            return
+
+        panels = span_config.get("panels", [])
+        if not panels:
+            logger.warning(f"[Span] No panels configured for site {site_name}")
+            return
+
+        # Get circuit fetch interval
+        circuit_interval_minutes = get_span_circuit_fetch_interval_minutes()
+
+        for panel_config in panels:
+            panel_host = panel_config.get("host")
+            panel_name = panel_config.get("name", panel_host)
+
+            if not panel_host:
+                logger.warning(f"[Span] Panel config missing host for site {site_name}")
+                continue
+
+            # Get token from database
+            token_data = get_span_panel_token_by_host(panel_host)
+            if not token_data:
+                logger.warning(
+                    f"[Span] No token found for panel at {panel_host}. "
+                    f"Run 'make span-register HOST={panel_host} NAME=\"{panel_name}\"' to register."
+                )
+                continue
+
+            panel_serial = token_data.get("panel_serial")
+            token = token_data.get("token")
+
+            # Update location_id in token if not set (auto-fix for existing tokens)
+            if token_data.get("location_id") is None and panel_serial:
+                logger.info(
+                    f"[Span] Updating location_id for panel {panel_serial} to {location_id}"
+                )
+                upsert_span_panel_token(
+                    panel_serial=panel_serial,
+                    panel_host=panel_host,
+                    token=token,
+                    panel_name=token_data.get("panel_name"),
+                    location_id=location_id,
+                )
+
+            logger.info(
+                f"[Span] Fetching data from panel '{panel_name}' ({panel_serial}) "
+                f"at {panel_host} for {site_name}"
+            )
+
+            try:
+                client = SpanPanelClient(
+                    panel_host=panel_host,
+                    token=token,
+                    panel_name=panel_name,
+                )
+
+                # Fetch panel-level data (every cycle)
+                data = client.fetch_current_data()
+
+                # Use serial from API if not in token data
+                if not panel_serial and data.get("panel_serial"):
+                    panel_serial = data["panel_serial"]
+
+                if panel_serial:
+                    # Insert panel reading
+                    insert_span_panel_reading(
+                        location_id=location_id,
+                        panel_serial=panel_serial,
+                        timestamp=data["timestamp"],
+                        instant_grid_power_w=data.get("instant_grid_power_w"),
+                        feedthrough_power_w=data.get("feedthrough_power_w"),
+                        main_relay_state=data.get("main_relay_state"),
+                        dsm_grid_state=data.get("dsm_grid_state"),
+                        dsm_state=data.get("dsm_state"),
+                        current_run_config=data.get("current_run_config"),
+                        door_state=data.get("door_state"),
+                        firmware_version=data.get("firmware_version"),
+                        uptime_seconds=data.get("uptime_seconds"),
+                        battery_soe_percent=data.get("battery_soe_percent"),
+                        eth0_link=data.get("eth0_link"),
+                        wlan_link=data.get("wlan_link"),
+                        wwan_link=data.get("wwan_link"),
+                        source="span",
+                        raw_data=data.get("raw_data"),
+                    )
+
+                    logger.info(
+                        f"[Span] Successfully fetched panel data from '{panel_name}' for {site_name} "
+                        f"(grid_power={data.get('instant_grid_power_w')}W, "
+                        f"door={data.get('door_state')})"
+                    )
+
+                    # Check if we should fetch circuit data
+                    last_circuit_time = get_last_span_circuit_reading_time(panel_serial)
+                    now = datetime.now(timezone.utc)
+                    should_fetch_circuits = False
+
+                    if last_circuit_time is None:
+                        should_fetch_circuits = True
+                    else:
+                        # Ensure timezone awareness
+                        if last_circuit_time.tzinfo is None:
+                            last_circuit_time = last_circuit_time.replace(tzinfo=timezone.utc)
+                        time_since_last = now - last_circuit_time
+                        if time_since_last >= timedelta(minutes=circuit_interval_minutes):
+                            should_fetch_circuits = True
+
+                    if should_fetch_circuits:
+                        try:
+                            circuits = client.fetch_circuit_data()
+                            if circuits:
+                                count = insert_span_circuit_readings(
+                                    location_id=location_id,
+                                    panel_serial=panel_serial,
+                                    timestamp=data["timestamp"],
+                                    circuits=circuits,
+                                    source="span",
+                                )
+                                logger.info(f"[Span] Fetched {count} circuits from '{panel_name}'")
+                            else:
+                                logger.warning(f"[Span] No circuits returned for '{panel_name}'")
+                        except Exception as circuit_error:
+                            logger.error(
+                                f"[Span] Error fetching circuits from '{panel_name}': {circuit_error}"
+                            )
+                    else:
+                        logger.debug(
+                            f"[Span] Skipping circuit fetch for '{panel_name}' "
+                            f"(last fetch was {last_circuit_time})"
+                        )
+                else:
+                    logger.warning(f"[Span] Could not determine panel serial for {panel_host}")
+
+            except Exception as panel_error:
+                logger.error(
+                    f"[Span] Error fetching from panel '{panel_name}' at {panel_host}: {panel_error}"
+                )
+                continue
+
+    except Exception as e:
+        logger.error(f"[Span] Error fetching data for {site_name}: {e}", exc_info=True)
+
+
 def fetch_system_stats():
     """
     Fetch system stats (CPU, memory, disk) and store in database.
@@ -1037,6 +1206,9 @@ def fetch_all_data(cycle_count: int = 0):
                 integrations.append("TankUtility")
             if "iaqualink" in site_config:
                 integrations.append("iAqualink")
+            if "span" in site_config:
+                panel_count = len(site_config["span"].get("panels", []))
+                integrations.append(f"Span({panel_count})" if panel_count > 1 else "Span")
 
             integration_str = ", ".join(integrations) if integrations else "none"
             logger.info(f"Processing site: {site_name} [{integration_str}]")
@@ -1093,6 +1265,10 @@ def fetch_all_data(cycle_count: int = 0):
             # Fetch iAqualink pool data (optional)
             if "iaqualink" in site_config:
                 fetch_iaqualink_data(site_name, site_config, location_id)
+
+            # Fetch Span panel data (optional, can have multiple panels)
+            if "span" in site_config:
+                fetch_span_data(site_name, site_config, location_id)
 
         # Fetch system stats (always runs, not site-specific)
         fetch_system_stats()

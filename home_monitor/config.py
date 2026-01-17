@@ -252,3 +252,22 @@ def get_enphase_fetch_interval_cycles() -> int:
         return int(os.getenv("ENPHASE_FETCH_INTERVAL_CYCLES", "3"))
     except ValueError:
         return 3
+
+
+def get_span_circuit_fetch_interval_minutes() -> int:
+    """
+    Get the interval in minutes between Span circuit data fetches.
+
+    Panel-level data is fetched every cycle (~5 minutes), but circuit-level
+    data is fetched less frequently to reduce storage. Cumulative energy
+    totals are never lost - only instant power granularity is affected.
+
+    Environment variable: SPAN_CIRCUIT_FETCH_INTERVAL_MINUTES
+
+    Returns:
+        Interval in minutes between circuit fetches (default: 15)
+    """
+    try:
+        return int(os.getenv("SPAN_CIRCUIT_FETCH_INTERVAL_MINUTES", "15"))
+    except ValueError:
+        return 15
