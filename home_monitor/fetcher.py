@@ -37,6 +37,7 @@ from home_monitor.database import (
     init_database,
     insert_battery_reading,
     insert_enphase_local_reading,
+    insert_fetch_run_summary,
     insert_irradiance_reading,
     insert_or_update_battery_bank,
     insert_pool_reading,
@@ -47,6 +48,8 @@ from home_monitor.database import (
     insert_sprinkler_run,
     insert_system_reading,
     insert_water_reading,
+    prune_fetch_run_summaries,
+    update_fetch_run_summary,
     upsert_span_panel_token,
 )
 from home_monitor.site_config import (
@@ -1162,13 +1165,49 @@ def fetch_system_stats():
         logger.error(f"[System] Error collecting system stats: {e}", exc_info=True)
 
 
-def fetch_all_data(cycle_count: int = 0):
+def fetch_all_data(cycle_count: int = 0, track_summary: bool = True):
     """
     Fetch data from all enabled APIs for all sites defined in sites.json.
 
     Args:
         cycle_count: Current fetch cycle number (used to throttle Enphase API calls)
+        track_summary: Whether to record fetch run summary to database
     """
+    started_at = datetime.now(timezone.utc)
+    run_id = None
+    integrations_summary = {}
+    total_calls = 0
+    has_error = False
+    error_message = None
+
+    # Create initial run summary record
+    if track_summary:
+        try:
+            run_id = insert_fetch_run_summary(started_at=started_at, status="running")
+        except Exception as e:
+            logger.warning(f"Failed to create fetch run summary: {e}")
+
+    def track_integration(name: str, success: bool):
+        """Track an integration call result."""
+        nonlocal total_calls
+        total_calls += 1
+        if name not in integrations_summary:
+            integrations_summary[name] = {"calls": 0, "success": 0, "failed": 0}
+        integrations_summary[name]["calls"] += 1
+        if success:
+            integrations_summary[name]["success"] += 1
+        else:
+            integrations_summary[name]["failed"] += 1
+
+    def safe_fetch(name: str, fetch_func, *args, **kwargs):
+        """Wrapper to safely call a fetch function and track results."""
+        try:
+            fetch_func(*args, **kwargs)
+            track_integration(name, success=True)
+        except Exception as e:
+            logger.error(f"[{name}] Error: {e}", exc_info=True)
+            track_integration(name, success=False)
+
     try:
         # Get all sites from configuration
         sites = get_sites()
@@ -1222,16 +1261,18 @@ def fetch_all_data(cycle_count: int = 0):
 
             # Fetch Tempest data (optional)
             if "tempest" in site_config:
-                fetch_tempest_data(site_name, site_config, location_id)
+                safe_fetch("tempest", fetch_tempest_data, site_name, site_config, location_id)
 
             # Fetch OpenWeather data (optional)
             if "openweather" in site_config:
-                fetch_openweather_data(site_name, site_config, location_id)
+                safe_fetch(
+                    "openweather", fetch_openweather_data, site_name, site_config, location_id
+                )
 
             # Fetch Enphase data (optional, throttled to save API quota)
             if "enphase" in site_config:
                 if is_enphase_cycle:
-                    fetch_enphase_data(site_name, site_config, location_id)
+                    safe_fetch("enphase", fetch_enphase_data, site_name, site_config, location_id)
                 else:
                     next_cycle = ((cycle_count // enphase_interval) + 1) * enphase_interval
                     logger.info(
@@ -1241,43 +1282,74 @@ def fetch_all_data(cycle_count: int = 0):
             # Fetch Enphase local gateway data (optional, not rate-limited)
             # Local gateway APIs are accessed directly on the network, no cloud quota
             if "enphase_local" in site_config:
-                fetch_enphase_local_data(site_name, site_config, location_id)
+                safe_fetch(
+                    "enphase_local", fetch_enphase_local_data, site_name, site_config, location_id
+                )
 
             # Fetch Tesla data (optional, can have multiple site_ids)
             if "tesla" in site_config:
                 tesla_config = site_config["tesla"]
                 site_ids = tesla_config.get("site_ids", [])
                 for energy_site_id in site_ids:
-                    fetch_tesla_data(site_name, site_config, location_id, str(energy_site_id))
+                    safe_fetch(
+                        "tesla",
+                        fetch_tesla_data,
+                        site_name,
+                        site_config,
+                        location_id,
+                        str(energy_site_id),
+                    )
 
             # Fetch Flume water data (optional)
             if "flume" in site_config:
-                fetch_flume_data(site_name, site_config, location_id)
+                safe_fetch("flume", fetch_flume_data, site_name, site_config, location_id)
 
             # Fetch Rachio sprinkler data (optional)
             if "rachio" in site_config:
-                fetch_rachio_data(site_name, site_config, location_id)
+                safe_fetch("rachio", fetch_rachio_data, site_name, site_config, location_id)
 
             # Fetch Tank Utility propane data (optional)
             if "tankutility" in site_config:
-                fetch_tankutility_data(site_name, site_config, location_id)
+                safe_fetch(
+                    "tankutility", fetch_tankutility_data, site_name, site_config, location_id
+                )
 
             # Fetch iAqualink pool data (optional)
             if "iaqualink" in site_config:
-                fetch_iaqualink_data(site_name, site_config, location_id)
+                safe_fetch("iaqualink", fetch_iaqualink_data, site_name, site_config, location_id)
 
             # Fetch Span panel data (optional, can have multiple panels)
             if "span" in site_config:
-                fetch_span_data(site_name, site_config, location_id)
+                safe_fetch("span", fetch_span_data, site_name, site_config, location_id)
 
         # Fetch system stats (always runs, not site-specific)
-        fetch_system_stats()
+        safe_fetch("system", fetch_system_stats)
 
         logger.info("Successfully fetched and stored data for all sites")
 
     except Exception as e:
+        has_error = True
+        error_message = str(e)
         logger.error(f"Error during data fetch: {e}", exc_info=True)
         raise
+    finally:
+        # Update run summary with final status
+        if track_summary and run_id:
+            try:
+                completed_at = datetime.now(timezone.utc)
+                status = "error" if has_error else "success"
+                update_fetch_run_summary(
+                    run_id=run_id,
+                    completed_at=completed_at,
+                    status=status,
+                    total_data_points=total_calls,
+                    integrations_summary=integrations_summary,
+                    error_message=error_message,
+                )
+                # Prune old summaries (keep last 20)
+                prune_fetch_run_summaries(keep_count=20)
+            except Exception as e:
+                logger.warning(f"Failed to update fetch run summary: {e}")
 
 
 if __name__ == "__main__":

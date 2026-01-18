@@ -145,6 +145,48 @@ When adding a new API integration:
 - Use `--save-to-db` to verify database insertion works
 - Use `--hide-raw` to reduce output verbosity
 
+## REST API
+
+The project includes a FastAPI-based REST API for configuration queries and maintenance operations.
+
+### Running the API
+
+- Local (without Docker): `make api-local`
+- Local (with Docker): `make api-up-local`
+- Remote: `make api-up-remote`
+
+### API Documentation
+
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+
+### Available Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/config/locations` | GET | Get all locations from database |
+| `/config/sites` | GET | Get site configuration from sites.json |
+| `/last` | GET | Get last fetcher run summary |
+| `/prune/span/circuits` | POST | Aggregate and prune old span circuit readings |
+
+### Adding New API Endpoints
+
+When adding new endpoints to `home_monitor/api.py`:
+
+1. Define Pydantic models for request/response schemas
+2. Add the endpoint function with appropriate tags
+3. Handle errors gracefully with HTTPException
+4. Add logging for operations that modify data
+5. Update this documentation
+
+### Fetch Run Summaries
+
+The fetcher automatically records run summaries to the `fetch_run_summaries` table:
+
+- Each run records start/end times, status, and per-integration results
+- Old summaries are automatically pruned (keeps last 20)
+- Query via `/last` endpoint or directly from database
+
 ## Remote Deployment
 
 Remote deployment operations use these Makefile targets:

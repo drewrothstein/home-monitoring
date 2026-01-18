@@ -463,6 +463,18 @@ test-service:  ## [local] 🧪 Test an API service (usage: make test-service SER
 		$(if $(SYSTEM_ID),--system-id $(SYSTEM_ID)) \
 		$(if $(DEVICE_ID),--device-id $(DEVICE_ID))
 
+api-local:  ## [local] 🌐 Start API server locally (without Docker)
+	DATABASE_URL=$(DATABASE_URL) PYTHONPATH=. uvicorn home_monitor.api:app --host 0.0.0.0 --port 8000 --reload
+
+api-up-local:  ## [local] 🌐 Start API server in Docker
+	docker-compose up -d api
+
+api-logs-local:  ## [local] 📋 View API server logs
+	docker-compose logs -f api
+
+api-stop-local:  ## [local] ⏹️  Stop API server
+	docker-compose stop api
+
 # =============================================================================
 # Remote Commands
 # =============================================================================
@@ -517,29 +529,38 @@ deploy-clean-remote:  ## [remote] 🧹 Remove Docker context for remote deployme
 		echo "✅ Removed context '$(DEPLOY_CONTEXT)'" || \
 		echo "⚠️  Context '$(DEPLOY_CONTEXT)' does not exist"
 
-deploy-disable-https-remote:  ## [remote] 🔓 Disable HTTPS on Grafana (switch back to HTTP)
-	@echo "🔓 Disabling HTTPS on remote Grafana..."
+deploy-disable-https-remote:  ## [remote] 🔓 Disable HTTPS on Grafana and API (switch back to HTTP)
+	@echo "🔓 Disabling HTTPS on remote services..."
 	@sed -i '' 's/^GF_SERVER_PROTOCOL=.*/GF_SERVER_PROTOCOL=http/' .env 2>/dev/null || true
+	@sed -i '' 's/^API_SSL_ENABLED=.*/API_SSL_ENABLED=false/' .env 2>/dev/null || true
 	@echo "📤 Syncing .env to remote..."
 	rsync -avz .env $(DEPLOY_HOST):$(DEPLOY_CONFIG_PATH)/
-	@echo "🔄 Recreating Grafana container..."
-	$(REMOTE_COMPOSE) up -d --force-recreate grafana"
+	@echo "🔄 Recreating Grafana and API containers..."
+	$(REMOTE_COMPOSE) up -d --force-recreate grafana api"
 	@echo ""
-	@echo "✅ HTTP restored! Access Grafana at: http://$(shell echo $(DEPLOY_HOST) | cut -d@ -f2):3000"
+	@echo "✅ HTTP restored!"
+	@echo "   Grafana: http://$(shell echo $(DEPLOY_HOST) | cut -d@ -f2):3000"
+	@echo "   API:     http://$(shell echo $(DEPLOY_HOST) | cut -d@ -f2):8000"
 
-deploy-enable-https-remote:  ## [remote] 🔒 Enable HTTPS on Grafana (generates certs if needed, restarts Grafana) (usage: make deploy-enable-https-remote [CERT_HOSTNAME=hostname])
-	@echo "🔒 Enabling HTTPS on remote Grafana..."
+deploy-enable-https-remote:  ## [remote] 🔒 Enable HTTPS on Grafana and API (generates certs if needed) (usage: make deploy-enable-https-remote [CERT_HOSTNAME=hostname])
+	@echo "🔒 Enabling HTTPS on remote services..."
 	@ssh $(DEPLOY_HOST) "test -f $(DEPLOY_CONFIG_PATH)/certs/grafana.crt" || $(MAKE) deploy-generate-certs-remote $(if $(CERT_HOSTNAME),CERT_HOSTNAME=$(CERT_HOSTNAME))
-	@echo "📝 Setting GF_SERVER_PROTOCOL=https in local .env (for docker-compose)..."
+	@echo "📝 Setting GF_SERVER_PROTOCOL=https in local .env..."
 	@grep -q '^GF_SERVER_PROTOCOL=' .env 2>/dev/null && \
 		sed -i '' 's/^GF_SERVER_PROTOCOL=.*/GF_SERVER_PROTOCOL=https/' .env || \
 		echo 'GF_SERVER_PROTOCOL=https' >> .env
+	@echo "📝 Setting API_SSL_ENABLED=true in local .env..."
+	@grep -q '^API_SSL_ENABLED=' .env 2>/dev/null && \
+		sed -i '' 's/^API_SSL_ENABLED=.*/API_SSL_ENABLED=true/' .env || \
+		echo 'API_SSL_ENABLED=true' >> .env
 	@echo "📤 Syncing .env to remote..."
 	rsync -avz .env $(DEPLOY_HOST):$(DEPLOY_CONFIG_PATH)/
-	@echo "🔄 Recreating Grafana container..."
-	$(REMOTE_COMPOSE) up -d --force-recreate grafana"
+	@echo "🔄 Recreating Grafana and API containers..."
+	$(REMOTE_COMPOSE) up -d --force-recreate grafana api"
 	@echo ""
-	@echo "✅ HTTPS enabled! Access Grafana at: https://$(shell echo $(DEPLOY_HOST) | cut -d@ -f2):3000"
+	@echo "✅ HTTPS enabled!"
+	@echo "   Grafana: https://$(shell echo $(DEPLOY_HOST) | cut -d@ -f2):3000"
+	@echo "   API:     https://$(shell echo $(DEPLOY_HOST) | cut -d@ -f2):8000"
 	@echo "   (You'll need to accept the self-signed certificate warning in your browser)"
 
 deploy-exec-remote:  ## [remote] 🐚 Open shell in remote container (usage: make deploy-exec-remote SERVICE=postgres)
@@ -557,7 +578,7 @@ deploy-fix-permissions-remote:  ## [remote] 🔧 Fix permissions on remote confi
 	ssh -t $(DEPLOY_HOST) "sudo chown -R \$$USER:\$$USER $(DEPLOY_CONFIG_PATH)"
 	@echo "✅ Permissions fixed"
 
-deploy-generate-certs-remote:  ## [remote] 🔐 Generate self-signed TLS certificates for Grafana HTTPS (usage: make deploy-generate-certs-remote [CERT_HOSTNAME=hostname])
+deploy-generate-certs-remote:  ## [remote] 🔐 Generate self-signed TLS certificates for HTTPS (Grafana + API) (usage: make deploy-generate-certs-remote [CERT_HOSTNAME=hostname])
 	$(eval CERT_CN := $(if $(CERT_HOSTNAME),$(CERT_HOSTNAME),$(shell echo $(DEPLOY_HOST) | cut -d@ -f2)))
 	@echo "🔐 Generating self-signed certificates on $(DEPLOY_HOST) for hostname '$(CERT_CN)'..."
 	ssh $(DEPLOY_HOST) "mkdir -p $(DEPLOY_CONFIG_PATH)/certs && \
@@ -585,10 +606,14 @@ deploy:  ## [remote] 🚀 Full deploy: sync files, rebuild, and restart everythi
 	@echo "🔨 Step 3: Rebuilding and restarting fetcher..."
 	$(REMOTE_COMPOSE) --profile scheduled up -d --build fetcher-scheduled"
 	@echo ""
+	@echo "🔨 Step 4: Rebuilding and restarting API..."
+	$(REMOTE_COMPOSE) up -d --build api"
+	@echo ""
 	@echo "✅ Deployment complete!"
 	@echo ""
 	@echo "View logs:"
 	@echo "  make fetcher-logs-remote   # Fetcher logs"
+	@echo "  make api-logs-remote       # API logs"
 	@echo "  make infra-logs-remote     # All container logs"
 
 deploy-remote:  ## [remote] 🚀 Deploy to remote host (builds and starts containers, no sync)
@@ -685,6 +710,17 @@ drop-db-remote:  ## [remote] 🗑️  Drop all database tables
 
 fetcher-logs-remote:  ## [remote] 📋 View fetcher logs
 	ssh $(DEPLOY_HOST) "docker logs -f home-monitor-fetcher-scheduled"
+
+api-up-remote:  ## [remote] 🌐 Start API server on remote
+	@echo "🌐 Starting API server on $(DEPLOY_HOST)..."
+	$(REMOTE_COMPOSE) up -d api"
+
+api-logs-remote:  ## [remote] 📋 View API server logs on remote
+	ssh $(DEPLOY_HOST) "docker logs -f home-monitor-api"
+
+api-stop-remote:  ## [remote] ⏹️  Stop API server on remote
+	@echo "⏹️  Stopping API server on $(DEPLOY_HOST)..."
+	ssh $(DEPLOY_HOST) "docker stop home-monitor-api || true"
 
 fetcher-start-remote:  ## [remote] ⏰ Start scheduled fetcher
 	@echo "⏰ Starting scheduled fetcher on $(DEPLOY_HOST)..."

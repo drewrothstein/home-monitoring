@@ -6,7 +6,7 @@ import json
 import logging
 import os
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
@@ -1116,6 +1116,24 @@ def init_database():
                     ON span_circuit_readings(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_span_circuit_readings_panel_circuit
                     ON span_circuit_readings(panel_serial, circuit_id, timestamp);
+            """
+            )
+
+            # Create fetch_run_summaries table for tracking fetcher runs
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fetch_run_summaries (
+                    id SERIAL PRIMARY KEY,
+                    started_at TIMESTAMPTZ NOT NULL,
+                    completed_at TIMESTAMPTZ,
+                    status VARCHAR(50) NOT NULL DEFAULT 'running',
+                    total_data_points INTEGER DEFAULT 0,
+                    integrations_summary JSONB,
+                    error_message TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_fetch_run_summaries_started_at
+                    ON fetch_run_summaries(started_at DESC);
             """
             )
 
@@ -2434,3 +2452,302 @@ def get_last_span_circuit_reading_time(panel_serial: str) -> Optional[datetime]:
             )
             result = cur.fetchone()
             return result[0] if result and result[0] else None
+
+
+# =============================================================================
+# Fetch Run Summary Functions
+# =============================================================================
+
+
+def insert_fetch_run_summary(
+    started_at: datetime,
+    completed_at: Optional[datetime] = None,
+    status: str = "running",
+    total_data_points: int = 0,
+    integrations_summary: Optional[Dict[str, Any]] = None,
+    error_message: Optional[str] = None,
+) -> int:
+    """
+    Insert a fetch run summary record.
+
+    Args:
+        started_at: When the fetch run started
+        completed_at: When the fetch run completed (None if still running)
+        status: Status of the run (running, success, error)
+        total_data_points: Total number of data points inserted
+        integrations_summary: Dict with counts per integration
+        error_message: Error message if status is error
+
+    Returns:
+        The inserted row ID
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO fetch_run_summaries (
+                    started_at, completed_at, status, total_data_points,
+                    integrations_summary, error_message
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    started_at,
+                    completed_at,
+                    status,
+                    total_data_points,
+                    json.dumps(integrations_summary) if integrations_summary else None,
+                    error_message,
+                ),
+            )
+            return cur.fetchone()[0]
+
+
+def update_fetch_run_summary(
+    run_id: int,
+    completed_at: Optional[datetime] = None,
+    status: Optional[str] = None,
+    total_data_points: Optional[int] = None,
+    integrations_summary: Optional[Dict[str, Any]] = None,
+    error_message: Optional[str] = None,
+) -> None:
+    """
+    Update a fetch run summary record.
+
+    Args:
+        run_id: ID of the run to update
+        completed_at: When the fetch run completed
+        status: Status of the run
+        total_data_points: Total number of data points inserted
+        integrations_summary: Dict with counts per integration
+        error_message: Error message if status is error
+    """
+    updates = []
+    values = []
+
+    if completed_at is not None:
+        updates.append("completed_at = %s")
+        values.append(completed_at)
+    if status is not None:
+        updates.append("status = %s")
+        values.append(status)
+    if total_data_points is not None:
+        updates.append("total_data_points = %s")
+        values.append(total_data_points)
+    if integrations_summary is not None:
+        updates.append("integrations_summary = %s")
+        values.append(json.dumps(integrations_summary))
+    if error_message is not None:
+        updates.append("error_message = %s")
+        values.append(error_message)
+
+    if not updates:
+        return
+
+    values.append(run_id)
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE fetch_run_summaries SET {', '.join(updates)} WHERE id = %s",
+                tuple(values),
+            )
+
+
+def get_fetch_run_summaries(limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Get the most recent fetch run summaries.
+
+    Args:
+        limit: Maximum number of summaries to return
+
+    Returns:
+        List of fetch run summary dicts, ordered by started_at descending
+    """
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT * FROM fetch_run_summaries
+                ORDER BY started_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return _rows_to_dicts(cur.fetchall(), ["integrations_summary"])
+
+
+def prune_fetch_run_summaries(keep_count: int = 10) -> int:
+    """
+    Delete old fetch run summaries, keeping only the most recent ones.
+
+    Args:
+        keep_count: Number of recent summaries to keep
+
+    Returns:
+        Number of rows deleted
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM fetch_run_summaries
+                WHERE id NOT IN (
+                    SELECT id FROM fetch_run_summaries
+                    ORDER BY started_at DESC
+                    LIMIT %s
+                )
+                """,
+                (keep_count,),
+            )
+            return cur.rowcount
+
+
+# =============================================================================
+# Span Circuit Aggregation/Pruning Functions
+# =============================================================================
+
+
+def aggregate_span_circuit_readings(
+    last_days: int = 30,
+    bucket_minutes: int = 30,
+) -> Dict[str, int]:
+    """
+    Aggregate old span circuit readings into time buckets to reduce storage.
+
+    For readings older than `last_days` days, this function:
+    1. Groups readings by (panel_serial, circuit_id, time_bucket)
+    2. For each group with multiple readings:
+       - Averages instant_power_w
+       - Sums import_energy_wh and export_energy_wh
+       - Keeps the latest timestamp
+       - Deletes original readings and inserts the aggregated one
+
+    Args:
+        last_days: Only aggregate readings older than this many days
+        bucket_minutes: Time bucket size in minutes for aggregation
+
+    Returns:
+        Dict with counts: rows_deleted, rows_inserted, buckets_processed
+    """
+    from datetime import timedelta
+
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=last_days)
+    bucket_seconds = bucket_minutes * 60
+
+    rows_deleted = 0
+    rows_inserted = 0
+    buckets_processed = 0
+
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Find all readings older than cutoff, grouped into time buckets
+            # We use date_trunc with custom interval via extract and floor
+            cur.execute(
+                """
+                WITH bucketed AS (
+                    SELECT
+                        id,
+                        location_id,
+                        panel_serial,
+                        circuit_id,
+                        circuit_name,
+                        tabs,
+                        instant_power_w,
+                        import_energy_wh,
+                        export_energy_wh,
+                        relay_state,
+                        priority,
+                        is_user_controllable,
+                        is_sheddable,
+                        is_never_backup,
+                        source,
+                        timestamp,
+                        -- Create bucket key: floor timestamp to bucket_minutes
+                        TO_TIMESTAMP(
+                            FLOOR(EXTRACT(EPOCH FROM timestamp) / %s) * %s
+                        ) AT TIME ZONE 'UTC' AS bucket_start
+                    FROM span_circuit_readings
+                    WHERE timestamp < %s
+                )
+                SELECT
+                    panel_serial,
+                    circuit_id,
+                    bucket_start,
+                    COUNT(*) as reading_count,
+                    ARRAY_AGG(id ORDER BY timestamp DESC) as ids,
+                    -- Aggregated values
+                    AVG(instant_power_w) as avg_power_w,
+                    SUM(import_energy_wh) as sum_import_wh,
+                    SUM(export_energy_wh) as sum_export_wh,
+                    -- Keep values from latest reading
+                    (ARRAY_AGG(location_id ORDER BY timestamp DESC))[1] as location_id,
+                    (ARRAY_AGG(circuit_name ORDER BY timestamp DESC))[1] as circuit_name,
+                    (ARRAY_AGG(tabs ORDER BY timestamp DESC))[1] as tabs,
+                    (ARRAY_AGG(relay_state ORDER BY timestamp DESC))[1] as relay_state,
+                    (ARRAY_AGG(priority ORDER BY timestamp DESC))[1] as priority,
+                    (ARRAY_AGG(is_user_controllable ORDER BY timestamp DESC))[1] as is_user_controllable,
+                    (ARRAY_AGG(is_sheddable ORDER BY timestamp DESC))[1] as is_sheddable,
+                    (ARRAY_AGG(is_never_backup ORDER BY timestamp DESC))[1] as is_never_backup,
+                    (ARRAY_AGG(source ORDER BY timestamp DESC))[1] as source,
+                    MAX(timestamp) as latest_timestamp
+                FROM bucketed
+                GROUP BY panel_serial, circuit_id, bucket_start
+                HAVING COUNT(*) > 1
+                ORDER BY panel_serial, circuit_id, bucket_start
+                """,
+                (bucket_seconds, bucket_seconds, cutoff_date),
+            )
+
+            buckets = cur.fetchall()
+
+            for bucket in buckets:
+                buckets_processed += 1
+                ids_to_delete = bucket["ids"]
+                reading_count = bucket["reading_count"]
+
+                # Delete all readings in this bucket
+                cur.execute(
+                    "DELETE FROM span_circuit_readings WHERE id = ANY(%s)",
+                    (ids_to_delete,),
+                )
+                rows_deleted += cur.rowcount
+
+                # Insert aggregated reading
+                cur.execute(
+                    """
+                    INSERT INTO span_circuit_readings (
+                        location_id, panel_serial, timestamp, circuit_id, circuit_name,
+                        tabs, instant_power_w, import_energy_wh, export_energy_wh,
+                        relay_state, priority, is_user_controllable, is_sheddable,
+                        is_never_backup, source, raw_data
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        bucket["location_id"],
+                        bucket["panel_serial"],
+                        bucket["latest_timestamp"],
+                        bucket["circuit_id"],
+                        bucket["circuit_name"],
+                        bucket["tabs"],
+                        bucket["avg_power_w"],
+                        bucket["sum_import_wh"],
+                        bucket["sum_export_wh"],
+                        bucket["relay_state"],
+                        bucket["priority"],
+                        bucket["is_user_controllable"],
+                        bucket["is_sheddable"],
+                        bucket["is_never_backup"],
+                        bucket["source"],
+                        json.dumps({"aggregated": True, "original_count": reading_count}),
+                    ),
+                )
+                rows_inserted += 1
+
+        conn.commit()
+
+    return {
+        "rows_deleted": rows_deleted,
+        "rows_inserted": rows_inserted,
+        "buckets_processed": buckets_processed,
+        "net_reduction": rows_deleted - rows_inserted,
+    }

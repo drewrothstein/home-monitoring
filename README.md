@@ -25,6 +25,7 @@ A multi-location home monitoring application that collects data from various API
   - [iAqualink API](#iaqualink-api)
   - [Span Panel API](#span-panel-api)
 - [Grafana Dashboard](#grafana-dashboard)
+- [REST API](#rest-api)
 - [Database Schema](#database-schema)
 - [Makefile Commands](#makefile-commands)
 - [Project Structure](#project-structure)
@@ -338,9 +339,10 @@ If you don't use OpenWeather but need coordinates for database storage, use:
 
 ### Docker Compose (Recommended)
 
-Docker Compose includes three services:
+Docker Compose includes four services:
 - **postgres**: PostgreSQL database (starts automatically)
 - **grafana**: Dashboard UI at http://localhost:3000 (starts automatically)
+- **api**: REST API at http://localhost:8000 (starts automatically)
 - **fetcher**: Data fetcher (manual profile - start explicitly)
 
 ```bash
@@ -993,6 +995,68 @@ make generate-dashboard-local
 
 **Important**: Do not edit `grafana/provisioning/dashboards/home-monitor.json` directly—it will be overwritten.
 
+## REST API
+
+The project includes a FastAPI-based REST API for querying configuration and managing data.
+
+### Running the API
+
+```bash
+# Local development (without Docker)
+make api-local
+
+# With Docker
+make api-up-local
+
+# Remote
+make api-up-remote
+```
+
+The API runs on port 8000 by default.
+
+### API Documentation
+
+FastAPI provides interactive documentation:
+
+- **Swagger UI**: http://localhost:8000/docs
+- **ReDoc**: http://localhost:8000/redoc
+
+### Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Health check |
+| `/config/locations` | GET | Get all locations from database |
+| `/config/sites` | GET | Get site configuration from sites.json |
+| `/last` | GET | Get last fetcher run summary and history |
+| `/prune/span/circuits` | POST | Aggregate and prune old span circuit readings |
+
+### Fetcher Run Tracking
+
+The fetcher automatically records run summaries to the database, including:
+- Start and completion timestamps
+- Status (running, success, error)
+- Per-integration call counts and success/failure rates
+- Error messages (if any)
+
+Query via the `/last` endpoint or directly from the `fetch_run_summaries` table.
+
+### Data Pruning
+
+The `/prune/span/circuits` endpoint aggregates old span circuit readings to reduce storage:
+
+```bash
+# Example: Aggregate readings older than 30 days into 30-minute buckets
+curl -X POST http://localhost:8000/prune/span/circuits \
+  -H "Content-Type: application/json" \
+  -d '{"last_days": 30, "bucket_minutes": 30}'
+```
+
+This preserves energy totals while reducing granularity for older data:
+- Averages `instant_power_w` within each bucket
+- Sums `import_energy_wh` and `export_energy_wh`
+- Keeps the latest timestamp per bucket
+
 ## Database Schema
 
 | Table | Description |
@@ -1014,6 +1078,7 @@ make generate-dashboard-local
 | `span_panel_readings` | Panel-level power data (grid power, status) |
 | `span_circuit_readings` | Per-circuit power and energy data |
 | `system_readings` | Host/container CPU, memory, and disk usage |
+| `fetch_run_summaries` | Fetcher run history (status, timing, per-integration stats) |
 
 All time-series tables include `timestamp` and `location_id` for efficient Grafana queries. The `system_readings` table is an exception—it tracks the fetcher host, not a specific location.
 
@@ -1056,6 +1121,10 @@ All time-series tables include `timestamp` and `location_id` for efficient Grafa
 | `make fetcher-start-local` | Start scheduled fetcher |
 | `make fetcher-stop-local` | Stop scheduled fetcher |
 | `make fetcher-logs-local` | View scheduled fetcher logs |
+| `make api-local` | Start API server locally (without Docker) |
+| `make api-up-local` | Start API server in Docker |
+| `make api-logs-local` | View API server logs |
+| `make api-stop-local` | Stop API server |
 
 ### API Token Management (Local)
 
@@ -1110,6 +1179,9 @@ All time-series tables include `timestamp` and `location_id` for efficient Grafa
 | `make fetcher-start-remote` | Start scheduled fetcher |
 | `make fetcher-stop-remote` | Stop scheduled fetcher |
 | `make fetcher-logs-remote` | View fetcher logs |
+| `make api-up-remote` | Start API server on remote |
+| `make api-logs-remote` | View API server logs on remote |
+| `make api-stop-remote` | Stop API server on remote |
 | `make init-db-remote` | Initialize database schema |
 | `make drop-db-remote` | Drop all tables |
 | `make db-migrate-to-remote` | Migrate database from local to remote (dump + copy + restore) |
@@ -1134,11 +1206,17 @@ All time-series tables include `timestamp` and `location_id` for efficient Grafa
 
 ### HTTPS Configuration (Remote)
 
+Enable HTTPS for both Grafana and the API service using shared self-signed certificates.
+
 | Command | Description |
 |---------|-------------|
-| `make deploy-enable-https-remote` | Enable HTTPS on Grafana (generates certs if needed, restarts Grafana) |
-| `make deploy-disable-https-remote` | Disable HTTPS on Grafana (switch back to HTTP) |
-| `make deploy-generate-certs-remote` | Generate self-signed TLS certificates for Grafana HTTPS |
+| `make deploy-enable-https-remote` | Enable HTTPS on Grafana and API (generates certs if needed) |
+| `make deploy-disable-https-remote` | Disable HTTPS on Grafana and API (switch back to HTTP) |
+| `make deploy-generate-certs-remote` | Generate self-signed TLS certificates for HTTPS |
+
+Both services use the same certificates from the `certs/` directory. You can also control them independently via environment variables:
+- `GF_SERVER_PROTOCOL=https` - Enable HTTPS for Grafana
+- `API_SSL_ENABLED=true` - Enable HTTPS for API service
 
 ## Project Structure
 
@@ -1156,6 +1234,7 @@ home-monitor/
 │   │   ├── tankutility.py
 │   │   ├── iaqualink.py
 │   │   └── span.py
+│   ├── api.py              # REST API (FastAPI)
 │   ├── config.py           # Credential management
 │   ├── database.py         # Database schema and operations
 │   ├── enphase_app_manager.py  # Multi-app Enphase rotation & failover

@@ -72,6 +72,31 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning
     restart: unless-stopped
 
+  api:
+    build: .
+    container_name: home-monitor-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://home_monitor:home_monitor_password@postgres:5432/home_monitor
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app  # Live code reloading for local development
+      - ./sites.json:/app/sites.json:ro
+    # HTTPS configuration - set API_SSL_ENABLED=true in .env to enable (uses same certs as Grafana)
+    # Note: --reload is incompatible with SSL in uvicorn, so SSL disables hot reload
+    command: >
+      sh -c "if [ \"$$API_SSL_ENABLED\" = 'true' ] && [ -f /app/certs/grafana.crt ]; then
+        uvicorn home_monitor.api:app --host 0.0.0.0 --port 8000 --ssl-keyfile /app/certs/grafana.key --ssl-certfile /app/certs/grafana.crt;
+      else
+        uvicorn home_monitor.api:app --host 0.0.0.0 --port 8000 --reload;
+      fi"
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   grafana_data:
