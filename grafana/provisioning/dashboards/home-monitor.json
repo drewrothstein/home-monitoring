@@ -4170,7 +4170,7 @@
       "id": 85,
       "gridPos": {
         "h": 8,
-        "w": 8,
+        "w": 6,
         "x": 0,
         "y": 101
       },
@@ -4183,7 +4183,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH latest AS (\n  SELECT panel_serial, MAX(timestamp) as latest_time\n  FROM span_circuit_readings scr\n  JOIN locations l ON scr.location_id = l.id\n  WHERE l.name IN ($location)\n  GROUP BY panel_serial\n),\nranked AS (\n  SELECT\n    scr.circuit_name AS metric,\n    scr.instant_power_w AS \"Power (W)\",\n    ROW_NUMBER() OVER (PARTITION BY scr.panel_serial ORDER BY ABS(scr.instant_power_w) DESC) as rn\n  FROM span_circuit_readings scr\n  JOIN latest ON scr.panel_serial = latest.panel_serial AND scr.timestamp = latest.latest_time\n)\nSELECT metric, \"Power (W)\"\nFROM ranked\nWHERE rn <= 10\nORDER BY ABS(\"Power (W)\") DESC",
+          "rawSql": "WITH latest AS (\n  SELECT panel_serial, MAX(timestamp) as latest_time\n  FROM span_circuit_readings scr\n  JOIN locations l ON scr.location_id = l.id\n  WHERE l.name IN ($location)\n  GROUP BY panel_serial\n),\nranked AS (\n  SELECT\n    scr.circuit_name AS metric,\n    ABS(scr.instant_power_w) AS \"Power (W)\",\n    ROW_NUMBER() OVER (ORDER BY ABS(scr.instant_power_w) DESC) as rn\n  FROM span_circuit_readings scr\n  JOIN latest ON scr.panel_serial = latest.panel_serial AND scr.timestamp = latest.latest_time\n)\nSELECT metric, \"Power (W)\"\nFROM ranked\nWHERE rn <= 10\nORDER BY \"Power (W)\" DESC",
           "refId": "A"
         }
       ],
@@ -4218,11 +4218,21 @@
                 "value": 0
               },
               {
+                "color": "yellow",
+                "value": 1000
+              },
+              {
+                "color": "orange",
+                "value": 3000
+              },
+              {
                 "color": "red",
-                "value": 80
+                "value": 5000
               }
             ]
           },
+          "min": 0,
+          "max": 10000,
           "unit": "watt"
         },
         "overrides": []
@@ -4257,8 +4267,8 @@
       "id": 86,
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 8,
+        "w": 6,
+        "x": 6,
         "y": 101
       },
       "type": "timeseries",
@@ -4327,8 +4337,8 @@
       "id": 87,
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
+        "w": 12,
+        "x": 12,
         "y": 101
       },
       "type": "piechart",
@@ -4340,8 +4350,25 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH energy_totals AS (\n  SELECT\n    scr.circuit_name,\n    MAX(scr.import_energy_wh) - MIN(scr.import_energy_wh) AS energy_wh\n  FROM span_circuit_readings scr\n  JOIN locations l ON scr.location_id = l.id\n  WHERE scr.timestamp >= $__timeFrom() AND scr.timestamp <= $__timeTo()\n    AND l.name IN ($location)\n  GROUP BY scr.circuit_name\n)\nSELECT\n  circuit_name AS metric,\n  energy_wh / 1000.0 AS \"Energy (kWh)\"\nFROM energy_totals\nWHERE energy_wh > 0\nORDER BY energy_wh DESC\nLIMIT 10",
+          "rawSql": "WITH energy_totals AS (\n  SELECT\n    scr.circuit_id,\n    scr.circuit_name,\n    MAX(scr.import_energy_wh) - MIN(scr.import_energy_wh) AS energy_wh\n  FROM span_circuit_readings scr\n  JOIN locations l ON scr.location_id = l.id\n  WHERE scr.timestamp >= $__timeFrom() AND scr.timestamp <= $__timeTo()\n    AND l.name IN ($location)\n  GROUP BY scr.circuit_id, scr.circuit_name\n)\nSELECT\n  circuit_name AS metric,\n  energy_wh / 1000.0 AS \"Energy (kWh)\"\nFROM energy_totals\nWHERE energy_wh > 0\nORDER BY energy_wh DESC\nLIMIT 10",
           "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "rowsToFields",
+          "options": {
+            "mappings": [
+              {
+                "fieldName": "metric",
+                "handlerKey": "field.name"
+              },
+              {
+                "fieldName": "Energy (kWh)",
+                "handlerKey": "field.value"
+              }
+            ]
+          }
         }
       ],
       "fieldConfig": {
@@ -4370,7 +4397,7 @@
             "lastNotNull"
           ],
           "fields": "",
-          "values": false
+          "values": true
         },
         "tooltip": {
           "mode": "single",

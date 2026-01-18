@@ -1008,15 +1008,15 @@ SQL_SPAN_TOP_CIRCUITS_BY_POWER = """WITH latest AS (
 ranked AS (
   SELECT
     scr.circuit_name AS metric,
-    scr.instant_power_w AS "Power (W)",
-    ROW_NUMBER() OVER (PARTITION BY scr.panel_serial ORDER BY ABS(scr.instant_power_w) DESC) as rn
+    ABS(scr.instant_power_w) AS "Power (W)",
+    ROW_NUMBER() OVER (ORDER BY ABS(scr.instant_power_w) DESC) as rn
   FROM span_circuit_readings scr
   JOIN latest ON scr.panel_serial = latest.panel_serial AND scr.timestamp = latest.latest_time
 )
 SELECT metric, "Power (W)"
 FROM ranked
 WHERE rn <= 10
-ORDER BY ABS("Power (W)") DESC"""
+ORDER BY "Power (W)" DESC"""
 
 SQL_SPAN_CIRCUIT_POWER_TIMESERIES = """SELECT
   scr.timestamp AS "time",
@@ -1060,13 +1060,14 @@ ORDER BY day, energy_wh DESC"""
 
 SQL_SPAN_TOP_ENERGY_CONSUMERS = """WITH energy_totals AS (
   SELECT
+    scr.circuit_id,
     scr.circuit_name,
     MAX(scr.import_energy_wh) - MIN(scr.import_energy_wh) AS energy_wh
   FROM span_circuit_readings scr
   JOIN locations l ON scr.location_id = l.id
   WHERE scr.timestamp >= $__timeFrom() AND scr.timestamp <= $__timeTo()
     AND l.name IN ($location)
-  GROUP BY scr.circuit_name
+  GROUP BY scr.circuit_id, scr.circuit_name
 )
 SELECT
   circuit_name AS metric,
@@ -3298,7 +3299,7 @@ def create_panels() -> list[dict[str, Any]]:
     panels.append(
         {
             "id": 85,
-            "gridPos": {"h": 8, "w": 8, "x": 0, "y": 101},
+            "gridPos": {"h": 8, "w": 6, "x": 0, "y": 101},
             "type": "bargauge",
             "title": "Top 10 Circuits by Power",
             "description": "Top 10 circuits by absolute power consumption.",
@@ -3331,9 +3332,13 @@ def create_panels() -> list[dict[str, Any]]:
                         "mode": "absolute",
                         "steps": [
                             {"color": GREEN, "value": 0},
-                            {"color": RED, "value": 80},
+                            {"color": YELLOW, "value": 1000},
+                            {"color": ORANGE, "value": 3000},
+                            {"color": RED, "value": 5000},
                         ],
                     },
+                    "min": 0,
+                    "max": 10000,
                     "unit": "watt",
                 },
                 "overrides": [],
@@ -3364,7 +3369,7 @@ def create_panels() -> list[dict[str, Any]]:
         power_timeseries(
             title="Total Circuit Power",
             sql=SQL_SPAN_TOTAL_CIRCUIT_POWER,
-            pos=GridPos(h=8, w=8, x=8, y=101),
+            pos=GridPos(h=8, w=6, x=6, y=101),
             panel_id=86,
             description="Sum of all circuit power readings over time.",
             legend_calcs=LEGEND_CALCS_STANDARD,
@@ -3375,7 +3380,7 @@ def create_panels() -> list[dict[str, Any]]:
     panels.append(
         {
             "id": 87,
-            "gridPos": {"h": 8, "w": 8, "x": 16, "y": 101},
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 101},
             "type": "piechart",
             "title": "Top Energy Consumers",
             "description": "Top 10 circuits by total energy consumption in selected time range.",
@@ -3388,6 +3393,17 @@ def create_panels() -> list[dict[str, Any]]:
                     "rawSql": SQL_SPAN_TOP_ENERGY_CONSUMERS,
                     "refId": "A",
                 },
+            ],
+            "transformations": [
+                {
+                    "id": "rowsToFields",
+                    "options": {
+                        "mappings": [
+                            {"fieldName": "metric", "handlerKey": "field.name"},
+                            {"fieldName": "Energy (kWh)", "handlerKey": "field.value"},
+                        ]
+                    },
+                }
             ],
             "fieldConfig": {
                 "defaults": {
@@ -3408,7 +3424,7 @@ def create_panels() -> list[dict[str, Any]]:
                 "reduceOptions": {
                     "calcs": ["lastNotNull"],
                     "fields": "",
-                    "values": False,
+                    "values": True,
                 },
                 "tooltip": {"mode": "single", "sort": "none"},
             },
