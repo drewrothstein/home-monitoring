@@ -17,8 +17,8 @@ from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Persistent counter for round-robin rotation (resets on process restart)
-_rotation_counter = 0
+# Note: Round-robin rotation removed in favor of "primary first" logic.
+# App #1 is always tried first; higher-numbered apps are fallbacks for rate limits.
 
 
 @dataclass
@@ -280,16 +280,16 @@ def get_next_app_with_failover(
     """
     Get the next available Enphase app, excluding failed ones.
 
-    Uses round-robin rotation but skips apps that have failed this cycle.
+    Uses "primary first" logic: always tries the lowest-indexed app first.
+    Higher-numbered apps are only used as fallbacks when lower ones fail
+    (e.g., due to rate limits).
 
     Args:
         exclude_indices: List of app indices to skip (failed apps)
 
     Returns:
-        Next available app, or None if all apps exhausted
+        Next available app (lowest index not excluded), or None if all exhausted
     """
-    global _rotation_counter
-
     apps = get_all_enphase_apps()
     if not apps:
         return None
@@ -301,17 +301,16 @@ def get_next_app_with_failover(
         logger.warning("[Enphase] All apps have been tried and failed")
         return None
 
-    # Round-robin among available apps
-    app = available_apps[_rotation_counter % len(available_apps)]
-    _rotation_counter += 1
+    # Primary-first: always use the lowest-indexed available app
+    # (apps are already sorted by index from get_all_enphase_apps)
+    app = available_apps[0]
 
     # Load tokens
     app = load_app_with_tokens(app)
 
     logger.debug(
         f"[Enphase] Selected app {app.app_index} "
-        f"(rotation {_rotation_counter}, {len(available_apps)} available, "
-        f"{len(exclude_indices)} excluded)"
+        f"({len(available_apps)} available, {len(exclude_indices)} excluded)"
     )
 
     return app
@@ -340,7 +339,10 @@ def is_auth_error(error: Exception) -> bool:
 
 class EnphaseAppRotator:
     """
-    Context manager for Enphase API calls with automatic rotation and failover.
+    Context manager for Enphase API calls with automatic failover.
+
+    Uses "primary first" logic: always tries app #1 first, then falls back
+    to #2, #3, etc. only if the previous app fails (e.g., rate limit 429).
 
     Usage:
         rotator = EnphaseAppRotator()
