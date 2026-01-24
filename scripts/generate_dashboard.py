@@ -1086,7 +1086,7 @@ SQL_SPAN_CIRCUIT_TABLE = """WITH latest AS (
 )
 SELECT
   scr.circuit_name AS "Circuit",
-  ROUND(scr.instant_power_w::numeric, 1) AS "Power (W)",
+  ROUND(ABS(scr.instant_power_w)::numeric, 1) AS "Power (W)",
   ROUND((scr.import_energy_wh / 1000.0)::numeric, 2) AS "Import (kWh)",
   ROUND((scr.export_energy_wh / 1000.0)::numeric, 2) AS "Export (kWh)",
   scr.relay_state AS "Relay",

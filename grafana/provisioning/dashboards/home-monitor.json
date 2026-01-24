@@ -4422,7 +4422,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH latest AS (\n  SELECT panel_serial, MAX(timestamp) as latest_time\n  FROM span_circuit_readings scr\n  JOIN locations l ON scr.location_id = l.id\n  WHERE l.name IN ($location)\n  GROUP BY panel_serial\n)\nSELECT\n  scr.circuit_name AS \"Circuit\",\n  ROUND(scr.instant_power_w::numeric, 1) AS \"Power (W)\",\n  ROUND((scr.import_energy_wh / 1000.0)::numeric, 2) AS \"Import (kWh)\",\n  ROUND((scr.export_energy_wh / 1000.0)::numeric, 2) AS \"Export (kWh)\",\n  scr.relay_state AS \"Relay\",\n  scr.priority AS \"Priority\"\nFROM span_circuit_readings scr\nJOIN latest ON scr.panel_serial = latest.panel_serial AND scr.timestamp = latest.latest_time\nORDER BY ABS(scr.instant_power_w) DESC",
+          "rawSql": "WITH latest AS (\n  SELECT panel_serial, MAX(timestamp) as latest_time\n  FROM span_circuit_readings scr\n  JOIN locations l ON scr.location_id = l.id\n  WHERE l.name IN ($location)\n  GROUP BY panel_serial\n)\nSELECT\n  scr.circuit_name AS \"Circuit\",\n  ROUND(ABS(scr.instant_power_w)::numeric, 1) AS \"Power (W)\",\n  ROUND((scr.import_energy_wh / 1000.0)::numeric, 2) AS \"Import (kWh)\",\n  ROUND((scr.export_energy_wh / 1000.0)::numeric, 2) AS \"Export (kWh)\",\n  scr.relay_state AS \"Relay\",\n  scr.priority AS \"Priority\"\nFROM span_circuit_readings scr\nJOIN latest ON scr.panel_serial = latest.panel_serial AND scr.timestamp = latest.latest_time\nORDER BY ABS(scr.instant_power_w) DESC",
           "refId": "A"
         }
       ],
