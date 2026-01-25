@@ -214,8 +214,8 @@ def init_database():
                 CREATE TABLE IF NOT EXISTS locations (
                     id SERIAL PRIMARY KEY,
                     name VARCHAR(255) NOT NULL UNIQUE,
-                    latitude DOUBLE PRECISION NOT NULL,
-                    longitude DOUBLE PRECISION NOT NULL,
+                    latitude DOUBLE PRECISION,
+                    longitude DOUBLE PRECISION,
                     timezone VARCHAR(50),
                     capacity_kw DOUBLE PRECISION,
                     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -227,6 +227,14 @@ def init_database():
 
             # Add capacity_kw column if it doesn't exist (for existing databases)
             _add_column_if_not_exists(cur, "locations", "capacity_kw", "DOUBLE PRECISION")
+
+            # Make latitude/longitude nullable for existing databases (migration)
+            cur.execute(
+                """
+                ALTER TABLE locations ALTER COLUMN latitude DROP NOT NULL;
+                ALTER TABLE locations ALTER COLUMN longitude DROP NOT NULL;
+                """
+            )
 
             # Create location_api_configs table
             cur.execute(

@@ -160,11 +160,11 @@ class TestValidateSiteConfig:
         with pytest.raises(ValueError, match="'timezone' must be a string"):
             validate_site_config("NY", site_config)
 
-    def test_validate_missing_coordinates(self):
-        """Test error when coordinates are missing."""
+    def test_validate_without_coordinates(self):
+        """Test that coordinates are optional."""
         site_config = {"capacity_kw": 10.0}
-        with pytest.raises(ValueError, match="location coordinates required"):
-            validate_site_config("NY", site_config)
+        # Should not raise - coordinates are optional
+        validate_site_config("NY", site_config)
 
     def test_validate_coordinates_from_openweather(self):
         """Test coordinates can come from openweather config."""

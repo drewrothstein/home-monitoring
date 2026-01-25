@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 def add_location(
     name: str,
-    latitude: float,
-    longitude: float,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
     timezone: Optional[str] = None,
     capacity_kw: Optional[float] = None,
 ) -> Dict[str, Any]:
@@ -31,8 +31,8 @@ def add_location(
 
     Args:
         name: Location name
-        latitude: Latitude coordinate
-        longitude: Longitude coordinate
+        latitude: Latitude coordinate (optional)
+        longitude: Longitude coordinate (optional)
         timezone: Timezone offset (optional, e.g., "+05:00")
         capacity_kw: Solar capacity in kilowatts (optional but recommended)
 

@@ -112,22 +112,16 @@ def validate_site_config(site_name: str, site_config: Dict[str, Any]) -> None:
                 f"Site '{site_name}': 'timezone' must be a string (e.g., 'America/New_York')"
             )
 
-    # Location coordinates are required (used for database location entry)
+    # Location coordinates are optional (only needed for OpenWeather integration)
     # Can come from openweather config or a dedicated location block
-    has_coordinates = False
-    if "openweather" in site_config:
-        ow = site_config["openweather"]
-        if isinstance(ow, dict) and "latitude" in ow and "longitude" in ow:
-            has_coordinates = True
     if "location" in site_config:
         loc = site_config["location"]
-        if isinstance(loc, dict) and "latitude" in loc and "longitude" in loc:
-            has_coordinates = True
-    if not has_coordinates:
-        raise ValueError(
-            f"Site '{site_name}': location coordinates required. "
-            "Add 'openweather' with latitude/longitude, or add a 'location' block."
-        )
+        if not isinstance(loc, dict):
+            raise ValueError(f"Site '{site_name}': 'location' must be a dictionary")
+        if "latitude" in loc and not isinstance(loc["latitude"], (int, float)):
+            raise ValueError(f"Site '{site_name}': 'location.latitude' must be a number")
+        if "longitude" in loc and not isinstance(loc["longitude"], (int, float)):
+            raise ValueError(f"Site '{site_name}': 'location.longitude' must be a number")
 
     # Tempest is optional - validate if present
     if "tempest" in site_config:
@@ -302,7 +296,7 @@ def ensure_site_in_database(site_name: str) -> int:
     try:
         from home_monitor.database import get_connection, get_locations
 
-        # Get coordinates from OpenWeather config or location block
+        # Get coordinates from OpenWeather config or location block (optional)
         latitude = None
         longitude = None
         if "openweather" in site_config:
@@ -313,11 +307,6 @@ def ensure_site_in_database(site_name: str) -> int:
             location_config = site_config["location"]
             latitude = location_config.get("latitude", latitude)
             longitude = location_config.get("longitude", longitude)
-        if latitude is None or longitude is None:
-            raise ValueError(
-                f"Site '{site_name}': latitude and longitude required. "
-                "Add 'openweather' or 'location' block with coordinates."
-            )
 
         # Get capacity (required)
         capacity_kw = site_config.get("capacity_kw")
@@ -333,10 +322,23 @@ def ensure_site_in_database(site_name: str) -> int:
                 update_fields = []
                 update_values = []
 
-                if (
-                    abs(location.get("latitude", 0) - latitude) > 0.0001
-                    or abs(location.get("longitude", 0) - longitude) > 0.0001
-                ):
+                # Check if coordinates need updating (handle None values)
+                existing_lat = location.get("latitude")
+                existing_lon = location.get("longitude")
+                coords_changed = False
+                if latitude is None and longitude is None:
+                    # New config has no coordinates - only update if existing has coordinates
+                    coords_changed = existing_lat is not None or existing_lon is not None
+                elif existing_lat is None or existing_lon is None:
+                    # Existing has no coordinates but new config does
+                    coords_changed = True
+                else:
+                    # Both have coordinates - check if they've changed
+                    coords_changed = (
+                        abs(existing_lat - latitude) > 0.0001
+                        or abs(existing_lon - longitude) > 0.0001
+                    )
+                if coords_changed:
                     needs_update = True
                     update_fields.append("latitude = %s")
                     update_fields.append("longitude = %s")

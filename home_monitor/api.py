@@ -52,8 +52,8 @@ class LocationResponse(BaseModel):
 
     id: int
     name: str
-    latitude: float
-    longitude: float
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     timezone: Optional[str] = None
     capacity_kw: Optional[float] = None
     created_at: datetime
