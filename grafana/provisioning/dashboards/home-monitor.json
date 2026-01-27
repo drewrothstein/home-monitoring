@@ -4595,74 +4595,79 @@
       "collapsed": false
     },
     {
-      "id": 8,
+      "id": 40,
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
         "y": 120
       },
-      "type": "bargauge",
-      "title": "Irradiance Sources Comparison",
-      "description": "Compare OpenWeather (forecast/model) vs Tempest (actual measured) irradiance data.",
+      "type": "timeseries",
+      "title": "API Calls by Integration",
+      "description": "Number of API calls per integration from fetch run summaries",
       "targets": [
         {
           "datasource": "Home Monitor PostgreSQL",
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n  ir.timestamp AS \"time\",\n  l.name || ' - ' || CASE\n    WHEN LOWER(ir.source) = 'openweather' THEN 'OpenWeather'\n    WHEN LOWER(ir.source) = 'tempest' THEN 'Tempest'\n    ELSE INITCAP(ir.source)\n  END || ' GHI' AS metric,\n  ir.ghi_cloudy_sky AS \"GHI (W/m\u00b2)\"\nFROM irradiance_readings ir\nJOIN locations l ON ir.location_id = l.id\nWHERE ir.timestamp >= $__timeFrom() AND ir.timestamp <= $__timeTo()\n  AND ir.ghi_cloudy_sky IS NOT NULL\n  AND l.name IN ($location)\nORDER BY \"time\" ",
+          "rawSql": "SELECT\n  frs.started_at AS \"time\",\n  key AS metric,\n  (value->>'calls')::INTEGER AS \"API Calls\"\nFROM fetch_run_summaries frs,\n  jsonb_each(frs.integrations_summary)\nWHERE frs.started_at >= $__timeFrom() AND frs.started_at <= $__timeTo()\n  AND frs.integrations_summary IS NOT NULL\nORDER BY \"time\" ",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "continuous-GrYlRd"
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
           },
           "mappings": [],
+          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
+                "value": null
               }
             ]
           },
-          "unit": "W / m^2"
+          "unit": "none",
+          "decimals": 0
         },
         "overrides": []
       },
       "options": {
-        "displayMode": "lcd",
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
         "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "maxVizHeight": 300,
-        "minVizHeight": 16,
-        "minVizWidth": 8,
-        "namePlacement": "auto",
-        "orientation": "horizontal",
-        "reduceOptions": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
           "calcs": [
+            "sum",
             "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showUnfilled": true,
-        "sizing": "auto",
-        "valueMode": "color"
-      },
-      "pluginVersion": "12.3.1"
+          ]
+        }
+      }
     }
   ],
   "annotations": {

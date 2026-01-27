@@ -348,21 +348,6 @@ WHERE pr.timestamp >= $__timeFrom() AND pr.timestamp <= $__timeTo()
 GROUP BY date_trunc('minute', pr.timestamp), l.name, pr.source
 ORDER BY "time" """
 
-SQL_IRRADIANCE_COMPARISON = """SELECT
-  ir.timestamp AS "time",
-  l.name || ' - ' || CASE
-    WHEN LOWER(ir.source) = 'openweather' THEN 'OpenWeather'
-    WHEN LOWER(ir.source) = 'tempest' THEN 'Tempest'
-    ELSE INITCAP(ir.source)
-  END || ' GHI' AS metric,
-  ir.ghi_cloudy_sky AS "GHI (W/m²)"
-FROM irradiance_readings ir
-JOIN locations l ON ir.location_id = l.id
-WHERE ir.timestamp >= $__timeFrom() AND ir.timestamp <= $__timeTo()
-  AND ir.ghi_cloudy_sky IS NOT NULL
-  AND l.name IN ($location)
-ORDER BY "time" """
-
 SQL_WATER_USAGE_DAILY = """SELECT
   wr.timestamp AS "time",
   l.name || ' (' || wr.source || ')' AS metric,
@@ -899,6 +884,16 @@ SQL_DISK_TIMESERIES = """SELECT
   sr.disk_percent AS "Disk (%)"
 FROM system_readings sr
 WHERE sr.timestamp >= $__timeFrom() AND sr.timestamp <= $__timeTo()
+ORDER BY "time" """
+
+SQL_API_CALLS_BY_INTEGRATION = """SELECT
+  frs.started_at AS "time",
+  key AS metric,
+  (value->>'calls')::INTEGER AS "API Calls"
+FROM fetch_run_summaries frs,
+  jsonb_each(frs.integrations_summary)
+WHERE frs.started_at >= $__timeFrom() AND frs.started_at <= $__timeTo()
+  AND frs.integrations_summary IS NOT NULL
 ORDER BY "time" """
 
 # =============================================================================
@@ -3562,16 +3557,62 @@ def create_panels() -> list[dict[str, Any]]:
         }
     )
 
-    # Irradiance Sources Comparison (moved to Debug section)
+    # API Calls by Integration
     panels.append(
-        bar_gauge_panel(
-            title="Irradiance Sources Comparison",
-            sql=SQL_IRRADIANCE_COMPARISON,
-            pos=GridPos(h=8, w=12, x=0, y=120),
-            panel_id=8,
-            unit="W / m^2",
-            description="Compare OpenWeather (forecast/model) vs Tempest (actual measured) irradiance data.",
-        )
+        {
+            "id": 40,
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 120},
+            "type": "timeseries",
+            "title": "API Calls by Integration",
+            "description": "Number of API calls per integration from fetch run summaries",
+            "targets": [
+                {
+                    "datasource": DATASOURCE,
+                    "editorMode": "code",
+                    "format": "time_series",
+                    "rawQuery": True,
+                    "rawSql": SQL_API_CALLS_BY_INTEGRATION,
+                    "refId": "A",
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "color": {"mode": "palette-classic"},
+                    "custom": {
+                        "axisCenteredZero": False,
+                        "axisColorMode": "text",
+                        "axisLabel": "",
+                        "axisPlacement": "auto",
+                        "drawStyle": "bars",
+                        "fillOpacity": 80,
+                        "lineInterpolation": "linear",
+                        "lineWidth": 1,
+                        "pointSize": 5,
+                        "showPoints": "never",
+                        "spanNulls": False,
+                        "stacking": {"group": "A", "mode": "normal"},
+                    },
+                    "mappings": [],
+                    "min": 0,
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [{"color": GREEN, "value": None}],
+                    },
+                    "unit": "none",
+                    "decimals": 0,
+                },
+                "overrides": [],
+            },
+            "options": {
+                "tooltip": {"mode": "multi", "sort": "desc"},
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "right",
+                    "showLegend": True,
+                    "calcs": ["sum", "lastNotNull"],
+                },
+            },
+        }
     )
 
     return panels
