@@ -4604,7 +4604,7 @@
       },
       "type": "timeseries",
       "title": "API Calls by Integration",
-      "description": "Number of API calls per integration from fetch run summaries",
+      "description": "API calls per integration from fetch run summaries. Limited by retained run history (last 500 runs; dashboard time range applies).",
       "targets": [
         {
           "datasource": "Home Monitor PostgreSQL",
@@ -4665,6 +4665,78 @@
           "calcs": [
             "sum",
             "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 41,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 120
+      },
+      "type": "timeseries",
+      "title": "Water Gallons (Cumulative)",
+      "description": "Cumulative water usage over the selected time range. Uses daily readings. Legend 'Last' = total gallons for the range.",
+      "targets": [
+        {
+          "datasource": "Home Monitor PostgreSQL",
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH latest_per_day AS (\n  SELECT DISTINCT ON (wr.location_id, DATE(wr.timestamp))\n    wr.location_id,\n    DATE(wr.timestamp) AS day,\n    wr.usage_gallons AS g\n  FROM water_readings wr\n  JOIN locations l ON wr.location_id = l.id\n  WHERE wr.timestamp >= $__timeFrom() AND wr.timestamp <= $__timeTo()\n    AND wr.usage_gallons IS NOT NULL\n    AND wr.usage_period = 'day'\n    AND l.name IN ($location)\n  ORDER BY wr.location_id, DATE(wr.timestamp), wr.timestamp DESC\n),\ndaily_totals AS (\n  SELECT day, SUM(g) AS total_gallons\n  FROM latest_per_day\n  GROUP BY day\n)\nSELECT\n  day::timestamptz AS \"time\",\n  SUM(total_gallons) OVER (ORDER BY day) AS \"Cumulative (gal)\"\nFROM daily_totals\nORDER BY \"time\" ",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "gal",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "mean"
           ]
         }
       }

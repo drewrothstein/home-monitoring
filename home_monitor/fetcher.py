@@ -1346,8 +1346,8 @@ def fetch_all_data(cycle_count: int = 0, track_summary: bool = True):
                     integrations_summary=integrations_summary,
                     error_message=error_message,
                 )
-                # Prune old summaries (keep last 20)
-                prune_fetch_run_summaries(keep_count=20)
+                # Prune old summaries (keep last 500 for ~40+ hours at 5-min interval)
+                prune_fetch_run_summaries(keep_count=500)
             except Exception as e:
                 logger.warning(f"Failed to update fetch run summary: {e}")
 

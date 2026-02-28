@@ -896,9 +896,32 @@ WHERE frs.started_at >= $__timeFrom() AND frs.started_at <= $__timeTo()
   AND frs.integrations_summary IS NOT NULL
 ORDER BY "time" """
 
-# =============================================================================
-# SPAN PANEL SQL QUERIES
-# =============================================================================
+# Water gallons cumulative over dashboard time range (daily readings only).
+# Use one reading per location per day (latest timestamp) so we don't double-count
+# when multiple fetches per day each report "usage today".
+SQL_WATER_GALLONS_CUMULATIVE = """WITH latest_per_day AS (
+  SELECT DISTINCT ON (wr.location_id, DATE(wr.timestamp))
+    wr.location_id,
+    DATE(wr.timestamp) AS day,
+    wr.usage_gallons AS g
+  FROM water_readings wr
+  JOIN locations l ON wr.location_id = l.id
+  WHERE wr.timestamp >= $__timeFrom() AND wr.timestamp <= $__timeTo()
+    AND wr.usage_gallons IS NOT NULL
+    AND wr.usage_period = 'day'
+    AND l.name IN ($location)
+  ORDER BY wr.location_id, DATE(wr.timestamp), wr.timestamp DESC
+),
+daily_totals AS (
+  SELECT day, SUM(g) AS total_gallons
+  FROM latest_per_day
+  GROUP BY day
+)
+SELECT
+  day::timestamptz AS "time",
+  SUM(total_gallons) OVER (ORDER BY day) AS "Cumulative (gal)"
+FROM daily_totals
+ORDER BY "time" """
 
 SQL_SPAN_GRID_POWER = """SELECT
   spr.timestamp AS "time",
@@ -3564,7 +3587,7 @@ def create_panels() -> list[dict[str, Any]]:
             "gridPos": {"h": 8, "w": 12, "x": 0, "y": 120},
             "type": "timeseries",
             "title": "API Calls by Integration",
-            "description": "Number of API calls per integration from fetch run summaries",
+            "description": "API calls per integration from fetch run summaries. Limited by retained run history (last 500 runs; dashboard time range applies).",
             "targets": [
                 {
                     "datasource": DATASOURCE,
@@ -3610,6 +3633,63 @@ def create_panels() -> list[dict[str, Any]]:
                     "placement": "right",
                     "showLegend": True,
                     "calcs": ["sum", "lastNotNull"],
+                },
+            },
+        }
+    )
+
+    # Water Gallons Cumulative (Debug) - total over selected time range
+    panels.append(
+        {
+            "id": 41,
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 120},
+            "type": "timeseries",
+            "title": "Water Gallons (Cumulative)",
+            "description": "Cumulative water usage over the selected time range. Uses daily readings. Legend 'Last' = total gallons for the range.",
+            "targets": [
+                {
+                    "datasource": DATASOURCE,
+                    "editorMode": "code",
+                    "format": "time_series",
+                    "rawQuery": True,
+                    "rawSql": SQL_WATER_GALLONS_CUMULATIVE,
+                    "refId": "A",
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "color": {"mode": "palette-classic"},
+                    "custom": {
+                        "axisCenteredZero": False,
+                        "axisColorMode": "text",
+                        "axisLabel": "",
+                        "axisPlacement": "auto",
+                        "drawStyle": "line",
+                        "fillOpacity": 20,
+                        "lineInterpolation": "linear",
+                        "lineWidth": 2,
+                        "pointSize": 5,
+                        "showPoints": "auto",
+                        "spanNulls": False,
+                    },
+                    "mappings": [],
+                    "min": 0,
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [{"color": BLUE, "value": None}],
+                    },
+                    "unit": "gal",
+                    "decimals": 1,
+                },
+                "overrides": [],
+            },
+            "options": {
+                "tooltip": {"mode": "single", "sort": "none"},
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "right",
+                    "showLegend": True,
+                    "calcs": ["lastNotNull", "max", "mean"],
                 },
             },
         }
