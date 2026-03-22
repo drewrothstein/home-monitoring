@@ -207,12 +207,21 @@ def fetch_tesla_data(site_name: str, site_config: dict, location_id: int, energy
         batteries = data.get("batteries", [])
         if batteries and isinstance(batteries, list):
             # Multiple batteries - store individual readings
-            for battery in batteries:
+            for idx, battery in enumerate(batteries):
                 battery_index = battery.get("index")
-                battery_bank_id = None
-                if battery_index is not None:
-                    battery_bank = get_battery_bank(location_id, energy_site_id, battery_index)
-                    battery_bank_id = battery_bank["id"] if battery_bank else None
+                if battery_index is None:
+                    battery_index = idx
+                else:
+                    try:
+                        battery_index = int(battery_index)
+                    except (TypeError, ValueError):
+                        battery_index = idx
+
+                battery_bank = get_battery_bank(location_id, energy_site_id, battery_index)
+                battery_bank_id = battery_bank["id"] if battery_bank else None
+
+                battery_for_raw = dict(battery)
+                battery_for_raw["index"] = battery_index
 
                 battery_power = battery.get("battery_power", 0)
                 insert_battery_reading(
@@ -224,13 +233,17 @@ def fetch_tesla_data(site_name: str, site_config: dict, location_id: int, energy
                     power_discharging=abs(battery_power) if battery_power < 0 else None,
                     source="tesla",
                     raw_data={
-                        "battery": battery,
+                        "energy_site_id": str(energy_site_id),
+                        "battery": battery_for_raw,
                         "response": data.get("raw_data", {}).get("response", {}),
                     },
                     battery_bank_id=battery_bank_id,
                 )
         elif data.get("battery_energy") is not None or data.get("battery_soc") is not None:
-            # Single battery or legacy format - store aggregate reading
+            # Single battery or legacy format - store aggregate reading (API omitted batteries[]).
+            # Link to battery_index 0 when present so battery_bank_id is set like multi-battery path.
+            battery_bank_legacy = get_battery_bank(location_id, energy_site_id, 0)
+            battery_bank_id_legacy = battery_bank_legacy["id"] if battery_bank_legacy else None
             battery_power = data.get("battery_power", 0)
             insert_battery_reading(
                 location_id=location_id,
@@ -240,7 +253,11 @@ def fetch_tesla_data(site_name: str, site_config: dict, location_id: int, energy
                 power_charging=battery_power if battery_power > 0 else None,
                 power_discharging=abs(battery_power) if battery_power < 0 else None,
                 source="tesla",
-                raw_data=data.get("raw_data"),
+                raw_data={
+                    "energy_site_id": str(energy_site_id),
+                    "live_status": data.get("raw_data"),
+                },
+                battery_bank_id=battery_bank_id_legacy,
             )
 
         logger.info(

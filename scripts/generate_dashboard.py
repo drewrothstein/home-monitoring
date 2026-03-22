@@ -277,31 +277,70 @@ WHERE pr.timestamp >= $__timeFrom() AND pr.timestamp <= $__timeTo()
 GROUP BY date_trunc('minute', pr.timestamp), l.name, pr.source
 ORDER BY "time" """
 
-SQL_BATTERY_SOC_TIMESERIES = """-- Show per-energy-system battery readings
--- Each Tesla energy_site reports its own aggregate battery state
--- Use ROW_NUMBER within each minute to distinguish multiple systems
-WITH numbered_readings AS (
-  SELECT
+SQL_BATTERY_SOC_TIMESERIES = """-- One point per physical battery per minute (dedupe duplicate inserts / fetch cycles)
+-- Identity: battery_bank_id, else battery.index, else Tesla energy_site_id (one Grafana location, multiple sites),
+-- else row id. ROW_NUMBER is scoped per (location, minute, energy_site_id) for multi-battery legacy rows.
+WITH deduped AS (
+  SELECT DISTINCT ON (
+    br.location_id,
+    date_trunc('minute', br.timestamp),
+    COALESCE(
+      br.battery_bank_id::text,
+      br.raw_data->'battery'->>'index',
+      NULLIF(BTRIM(br.raw_data->>'energy_site_id'), ''),
+      br.id::text
+    )
+  )
+    br.id,
     br.timestamp,
     br.location_id,
     br.source,
     br.state_of_charge,
-    ROW_NUMBER() OVER (
-      PARTITION BY br.location_id, date_trunc('minute', br.timestamp)
-      ORDER BY br.timestamp
-    ) as system_num
+    br.battery_bank_id,
+    br.raw_data
   FROM battery_readings br
   WHERE br.timestamp >= $__timeFrom() AND br.timestamp <= $__timeTo()
     AND br.state_of_charge IS NOT NULL
+  ORDER BY
+    br.location_id,
+    date_trunc('minute', br.timestamp),
+    COALESCE(
+      br.battery_bank_id::text,
+      br.raw_data->'battery'->>'index',
+      NULLIF(BTRIM(br.raw_data->>'energy_site_id'), ''),
+      br.id::text
+    ),
+    br.timestamp DESC
 )
 SELECT
-  nr.timestamp AS "time",
-  l.name || ' (' || nr.source || ') - System ' || nr.system_num::text AS metric,
-  nr.state_of_charge AS "State of Charge (%)"
-FROM numbered_readings nr
-JOIN locations l ON nr.location_id = l.id
+  d.timestamp AS "time",
+  l.name || ' (' || d.source || ') ' || CASE
+    WHEN NULLIF(BTRIM(d.raw_data->>'energy_site_id'), '') IS NOT NULL
+    THEN '[' || RIGHT(BTRIM(d.raw_data->>'energy_site_id'), 6) || '] '
+    ELSE ''
+  END || '- System ' || (
+    COALESCE(
+      (bb.battery_index + 1),
+      CASE
+        WHEN d.raw_data#>>'{battery,index}' IS NOT NULL
+        THEN (d.raw_data#>>'{battery,index}')::integer + 1
+        ELSE NULL
+      END,
+      ROW_NUMBER() OVER (
+        PARTITION BY
+          d.location_id,
+          date_trunc('minute', d.timestamp),
+          COALESCE(NULLIF(BTRIM(d.raw_data->>'energy_site_id'), ''), '')
+        ORDER BY d.id
+      )
+    )
+  )::text AS metric,
+  d.state_of_charge AS "State of Charge (%)"
+FROM deduped d
+JOIN locations l ON d.location_id = l.id
+LEFT JOIN battery_banks bb ON bb.id = d.battery_bank_id
 WHERE l.name IN ($location)
-ORDER BY "time", l.name, nr.system_num"""
+ORDER BY "time", l.name, metric"""
 
 SQL_BATTERY_CHARGING = """SELECT
   date_trunc('minute', br.timestamp) AS "time",
@@ -1966,7 +2005,7 @@ def create_panels() -> list[dict[str, Any]]:
             "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
             "type": "timeseries",
             "title": "Battery State of Charge by Site",
-            "description": "Shows individual battery/Powerwall readings. Each energy system reports separately.",
+            "description": "Per battery per minute; deduped. Multiple Tesla energy_site IDs under one location show as [suffix] in the legend. Legacy rows without energy_site_id may still split by row id.",
             "targets": [
                 {
                     "datasource": DATASOURCE,

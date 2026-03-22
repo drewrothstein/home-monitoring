@@ -14,6 +14,14 @@ from psycopg2.extras import RealDictCursor
 
 logger = logging.getLogger(__name__)
 
+# PostgreSQL truncates identifiers to NAMEDATALEN - 1 (63); must match for ADD COLUMN vs INSERT lookups.
+PG_MAX_IDENTIFIER_LENGTH = 63
+
+
+def _pg_identifier(name: str) -> str:
+    """Return a PostgreSQL-safe identifier (lowercase, max 63 chars)."""
+    return name.lower()[:PG_MAX_IDENTIFIER_LENGTH]
+
 
 def get_database_url() -> str:
     """Get database URL from environment variable."""
@@ -56,17 +64,18 @@ def _add_column_if_not_exists(cur, table_name: str, column_name: str, column_typ
         column_type: SQL type for the column (e.g., 'TEXT', 'DOUBLE PRECISION')
     """
     # Check if column exists (case-insensitive comparison since PostgreSQL stores unquoted identifiers in lowercase)
+    pg_col = _pg_identifier(column_name)
     cur.execute(
         """
         SELECT column_name
         FROM information_schema.columns
-        WHERE table_name = %s AND LOWER(column_name) = LOWER(%s)
+        WHERE table_name = %s AND column_name = %s
         """,
-        (table_name, column_name),
+        (table_name, pg_col),
     )
     if not cur.fetchone():
-        # Column doesn't exist, add it
-        cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+        # Column doesn't exist, add it (name truncated to match PostgreSQL storage)
+        cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {pg_col} {column_type}")
 
 
 def _add_columns_if_not_exists(cur, table_name: str, columns: List[Tuple[str, str]]) -> None:
@@ -172,10 +181,9 @@ def _insert_with_flattened_raw_data(
     if raw_data:
         flattened_raw = _flatten_jsonb_fields(raw_data)
         for key, value in flattened_raw.items():
-            column_name = f"raw_data_{key}"
-            # PostgreSQL stores column names in lowercase, so compare lowercase
-            if column_name.lower() in existing_columns:
-                flattened[column_name.lower()] = value
+            column_name = _pg_identifier(f"raw_data_{key}")
+            if column_name in existing_columns:
+                flattened[column_name] = value
             else:
                 missing_columns.append(column_name)
 
@@ -446,6 +454,32 @@ def init_database():
                     ("raw_data_response_storm_mode_states_start_time", "TEXT"),
                     ("raw_data_response_storm_mode_states_end_time", "TEXT"),
                     ("raw_data_response_storm_mode_states_storm_type", "TEXT"),
+                    # Legacy Tesla insert wraps live_status: { energy_site_id, live_status: full API dict }
+                    ("raw_data_energy_site_id", "TEXT"),
+                    ("raw_data_live_status_response_solar_power", "TEXT"),
+                    ("raw_data_live_status_response_percentage_charged", "TEXT"),
+                    ("raw_data_live_status_response_battery_power", "TEXT"),
+                    ("raw_data_live_status_response_load_power", "TEXT"),
+                    ("raw_data_live_status_response_grid_status", "TEXT"),
+                    ("raw_data_live_status_response_grid_power", "TEXT"),
+                    ("raw_data_live_status_response_generator_power", "TEXT"),
+                    ("raw_data_live_status_response_wall_connectors", "TEXT"),
+                    ("raw_data_live_status_response_wall_connectors_din", "TEXT"),
+                    ("raw_data_live_status_response_wall_connectors_wall_connector_state", "TEXT"),
+                    ("raw_data_live_status_response_wall_connectors_wall_connector_power", "TEXT"),
+                    ("raw_data_live_status_response_wall_connectors_vin", "TEXT"),
+                    (
+                        "raw_data_live_status_response_wall_connectors_wall_connector_fault_state",
+                        "TEXT",
+                    ),
+                    ("raw_data_live_status_response_wall_connectors_ocpp_status", "TEXT"),
+                    (
+                        "raw_data_live_status_response_wall_connectors_powershare_session_state",
+                        "TEXT",
+                    ),
+                    ("raw_data_live_status_response_island_status", "TEXT"),
+                    ("raw_data_live_status_response_storm_mode_active", "TEXT"),
+                    ("raw_data_live_status_response_timestamp", "TEXT"),
                     # Raw data JSONB - MUST be last column
                     ("raw_data", "JSONB"),
                 ],

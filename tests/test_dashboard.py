@@ -11,6 +11,7 @@ from scripts.generate_dashboard import (
     create_panels,
     DEFAULT_ANNOTATIONS_ALL_DAY_TZ,
     sql_battery_soc,
+    SQL_BATTERY_SOC_TIMESERIES,
     SQL_SPRINKLER_RUNS_ANNOTATIONS,
     sql_target,
     threshold,
@@ -60,6 +61,19 @@ class TestSqlTarget:
         assert result.refId == "B"
         assert result.format == "table"
         assert result.datasource == "Home Monitor PostgreSQL"
+
+
+class TestSqlBatterySocTimeseries:
+    """Tests for SQL_BATTERY_SOC_TIMESERIES (Grafana panel query)."""
+
+    def test_battery_soc_timeseries_dedupes_and_labels_by_bank(self):
+        """One series per bank/index per minute, not arbitrary row numbers."""
+        assert "DISTINCT ON" in SQL_BATTERY_SOC_TIMESERIES
+        assert "battery_banks" in SQL_BATTERY_SOC_TIMESERIES
+        assert "battery_bank_id" in SQL_BATTERY_SOC_TIMESERIES
+        assert "{battery,index}" in SQL_BATTERY_SOC_TIMESERIES
+        assert "ROW_NUMBER()" in SQL_BATTERY_SOC_TIMESERIES
+        assert "energy_site_id" in SQL_BATTERY_SOC_TIMESERIES
 
 
 class TestSqlBatterySoc:
