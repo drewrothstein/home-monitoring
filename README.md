@@ -993,7 +993,7 @@ make generate-dashboard-local
 # Refresh Grafana in your browser (no restart needed)
 ```
 
-**Important**: Do not edit `grafana/provisioning/dashboards/home-monitor.json` directly—it will be overwritten.
+**Important**: Do not edit `grafana/provisioning/dashboards/home-monitor.json` directly—it is generated and gitignored. Run `make generate-dashboard-local` (or start the stack so the `dashboard-gen` container runs before Grafana) to create or refresh it.
 
 ## REST API
 

@@ -16,6 +16,12 @@ venv/
 # Site configuration (contains personal data)
 sites.json
 
+# Grafana dashboard annotations (personal / site-specific)
+annotations.json
+
+# Generated Grafana dashboard (may embed annotation SQL; not committed)
+grafana/provisioning/dashboards/home-monitor.json
+
 # IDE
 .idea/
 .vscode/

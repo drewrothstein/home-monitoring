@@ -4,10 +4,14 @@ import pytest
 from grafanalib.core import GridPos, SqlTarget
 
 from scripts.generate_dashboard import (
+    _annotation_time_sql_exprs,
+    build_sql_codified_annotations,
     color_override,
     create_dashboard,
     create_panels,
+    DEFAULT_ANNOTATIONS_ALL_DAY_TZ,
     sql_battery_soc,
+    SQL_SPRINKLER_RUNS_ANNOTATIONS,
     sql_target,
     threshold,
 )
@@ -162,6 +166,8 @@ class TestCreateDashboard:
         var_names = [var["name"] for var in templating_vars]
         assert "location" in var_names
         assert "source" in var_names
+        loc_var = next(v for v in templating_vars if v["name"] == "location")
+        assert loc_var["datasource"] == "Home Monitor PostgreSQL"
 
     def test_create_dashboard_has_time_options(self):
         """Test that dashboard has time range options."""
@@ -181,7 +187,103 @@ class TestCreateDashboard:
         assert "list" in dashboard["annotations"]
         annotations = dashboard["annotations"]["list"]
 
-        # Should have built-in annotations and sprinkler runs
         annotation_names = [ann.get("name", "") for ann in annotations]
         assert any("Annotations & Alerts" in name for name in annotation_names)
+        assert any(name == "Annotations" for name in annotation_names)
         assert any("Sprinkler Runs" in name for name in annotation_names)
+        anno = next(a for a in annotations if a.get("name") == "Annotations")
+        assert isinstance(anno.get("rawQuery"), str)
+        assert anno["rawQuery"] == anno.get("query")
+        assert anno["target"]["rawSql"] == anno["rawQuery"]
+        builtin = next(
+            a for a in annotations if a.get("name") == "Annotations & Alerts"
+        )
+        assert builtin.get("hide") is True
+
+    def test_build_sql_codified_annotations_empty(self):
+        """Empty codified list yields a no-op query."""
+        sql = build_sql_codified_annotations(
+            [], all_day_timezone=DEFAULT_ANNOTATIONS_ALL_DAY_TZ
+        )
+        assert 'WHERE false' in sql
+
+    def test_build_sql_codified_skips_location_when_no_sites(self):
+        """No $location filter unless an entry uses locations (avoids anno query breakage)."""
+        sql = build_sql_codified_annotations(
+            [
+                {
+                    "all_day": True,
+                    "date": "2026-03-01",
+                    "title": "t",
+                    "text": "",
+                    "tags": "",
+                },
+            ],
+            all_day_timezone=DEFAULT_ANNOTATIONS_ALL_DAY_TZ,
+        )
+        assert "$location" not in sql
+
+    def test_build_sql_codified_includes_fl_and_location_filter(self):
+        """Entries with locations are scoped via Site variable."""
+        sql = build_sql_codified_annotations(
+            [
+                {
+                    "all_day": True,
+                    "date": "2026-03-01",
+                    "title": "t",
+                    "text": "",
+                    "tags": "",
+                    "locations": ["FL"],
+                },
+            ],
+            all_day_timezone=DEFAULT_ANNOTATIONS_ALL_DAY_TZ,
+        )
+        assert "$location" in sql
+        assert "'FL'" in sql
+        assert " AS timeend" in sql
+        assert '"timeEnd"' not in sql
+
+    def test_sprinkler_annotations_overlap_visible_range(self):
+        """Runs that overlap the dashboard window are included (not only fully inside it)."""
+        assert "sr.start_time <= $__timeTo()" in SQL_SPRINKLER_RUNS_ANNOTATIONS
+        assert "sr.end_time >= $__timeFrom()" in SQL_SPRINKLER_RUNS_ANNOTATIONS
+
+    def test_sprinkler_annotations_use_timeend_column(self):
+        """Grafana SQL annotations expect a lowercase timeend field for regions."""
+        assert " AS timeend" in SQL_SPRINKLER_RUNS_ANNOTATIONS
+        assert "timeEnd" not in SQL_SPRINKLER_RUNS_ANNOTATIONS
+
+    def test_build_sql_codified_annotations_escapes_and_regions(self):
+        """Titles and optional time_end appear in generated SQL."""
+        sql = build_sql_codified_annotations(
+            [
+                {
+                    "time": "2025-01-01T12:00:00+00:00",
+                    "time_end": "2025-01-01T14:00:00+00:00",
+                    "title": "O'Brien",
+                    "text": "Note",
+                    "tags": "a,b",
+                    "locations": ["Home"],
+                },
+            ],
+            all_day_timezone=DEFAULT_ANNOTATIONS_ALL_DAY_TZ,
+        )
+        assert "O''Brien" in sql
+        assert " AS timeend" in sql
+        assert "Home" in sql
+
+    def test_annotation_time_sql_exprs_all_day_range(self):
+        """All-day range uses local TZ and end-exclusive midnight."""
+        ts_sql, end_sql = _annotation_time_sql_exprs(
+            {
+                "all_day": True,
+                "date_start": "2026-03-10",
+                "date_end": "2026-03-11",
+                "title": "x",
+            },
+            DEFAULT_ANNOTATIONS_ALL_DAY_TZ,
+        )
+        assert "AT TIME ZONE" in ts_sql
+        assert "America/New_York" in ts_sql
+        assert "2026-03-10" in ts_sql
+        assert "2026-03-12" in end_sql

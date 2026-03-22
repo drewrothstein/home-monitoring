@@ -1,0 +1,29 @@
+{
+  "all_day_timezone": "America/New_York",
+  "annotations": [
+    {
+      "all_day": true,
+      "date": "2025-06-01",
+      "title": "Example: single calendar day",
+      "text": "Replace with your notes. Use locations matching locations.name in Postgres (e.g. site keys from sites.json).",
+      "tags": "example",
+      "locations": ["MinimalSite"]
+    },
+    {
+      "all_day": true,
+      "date_start": "2025-06-10",
+      "date_end": "2025-06-11",
+      "title": "Example: two-day span",
+      "text": "Inclusive local calendar days in all_day_timezone.",
+      "tags": "example",
+      "locations": ["MinimalSite"]
+    },
+    {
+      "time": "2025-06-15T14:30:00+00:00",
+      "time_end": "2025-06-15T16:00:00+00:00",
+      "title": "Example: explicit window",
+      "text": "Optional time_end for a shaded region; omit locations to show for any Site selection.",
+      "tags": "example"
+    }
+  ]
+}

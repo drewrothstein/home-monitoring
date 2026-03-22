@@ -20,6 +20,8 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Generate Grafana dashboard JSON
+        run: make generate-dashboard-local
       - name: Run tests
         run: make test
 
@@ -36,6 +38,8 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Generate Grafana dashboard JSON
+        run: make generate-dashboard-local
       - name: Check formatting with black
         run: black --check home_monitor/ scripts/
       - name: Run lint

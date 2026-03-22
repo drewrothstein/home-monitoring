@@ -7,6 +7,7 @@ Run this script to regenerate the dashboard after making changes.
 """
 
 import json
+from datetime import date, timedelta
 from typing import Any
 
 from grafanalib.core import (
@@ -14,6 +15,8 @@ from grafanalib.core import (
     SqlTarget,
     Target,
 )
+
+from home_monitor.annotations_config import load_dashboard_annotations_config
 
 # =============================================================================
 # CONSTANTS
@@ -363,16 +366,129 @@ ORDER BY wr.timestamp"""
 # Sprinkler runs query for annotations
 SQL_SPRINKLER_RUNS_ANNOTATIONS = """SELECT
   sr.start_time AS "time",
-  sr.end_time AS "timeEnd",
-  'Sprinkler: ' || COALESCE(sr.zone_name, 'Zone ' || sr.zone_number::text) AS "title",
-  l.name || ' - ' || COALESCE(sr.zone_name, 'Zone ' || sr.zone_number::text)
-    || ' (' || COALESCE(sr.duration_seconds / 60, 0) || ' min)' AS "text",
-  'sprinkler,' || sr.schedule_type AS "tags"
+  sr.end_time AS timeend,
+  (
+    'Sprinkler: ' || COALESCE(sr.zone_name, 'Zone ' || sr.zone_number::text) || E'\\n' ||
+    l.name || ' - ' || COALESCE(sr.zone_name, 'Zone ' || sr.zone_number::text)
+    || ' (' || COALESCE(sr.duration_seconds / 60, 0) || ' min)'
+  ) AS "text",
+  ('sprinkler,' || sr.schedule_type) AS "tags"
 FROM sprinkler_runs sr
 JOIN locations l ON sr.location_id = l.id
-WHERE sr.start_time >= $__timeFrom() AND sr.end_time <= $__timeTo()
+WHERE sr.start_time <= $__timeTo()
+  AND sr.end_time >= $__timeFrom()
   AND l.name IN ($location)
 ORDER BY sr.start_time"""
+
+# Default IANA zone for all_day entries in annotations.json when a row has no per-entry
+# "timezone" and the file omits all_day_timezone.
+DEFAULT_ANNOTATIONS_ALL_DAY_TZ = "America/New_York"
+
+
+def _sql_string_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _next_calendar_day_iso(cal: str) -> str:
+    d = date.fromisoformat(cal)
+    return (d + timedelta(days=1)).isoformat()
+
+
+def _annotation_time_sql_exprs(ann: dict[str, Any], default_all_day_tz: str) -> tuple[str, str]:
+    """Return (start_sql, end_sql) as timestamptz SQL expressions."""
+    if ann.get("all_day"):
+        tz_lit = _sql_string_literal(ann.get("timezone") or default_all_day_tz)
+        if "date" in ann:
+            start_d = ann["date"]
+            end_next = _next_calendar_day_iso(start_d)
+        else:
+            start_d = ann["date_start"]
+            end_last = ann["date_end"]
+            end_next = _next_calendar_day_iso(end_last)
+        ts_sql = (
+            f"(TIMESTAMP {_sql_string_literal(f'{start_d} 00:00:00')} " f"AT TIME ZONE {tz_lit})"
+        )
+        end_sql = (
+            f"(TIMESTAMP {_sql_string_literal(f'{end_next} 00:00:00')} " f"AT TIME ZONE {tz_lit})"
+        )
+        return ts_sql, end_sql
+
+    time_s = ann["time"]
+    time_end = ann.get("time_end")
+    ts_sql = f"{_sql_string_literal(time_s)}::timestamptz"
+    if time_end is None:
+        return ts_sql, "NULL::timestamptz"
+    return ts_sql, f"{_sql_string_literal(time_end)}::timestamptz"
+
+
+def build_sql_codified_annotations(
+    annotations: list[dict[str, Any]],
+    *,
+    all_day_timezone: str,
+) -> str:
+    """Build a Grafana Postgres annotation query from annotation entry dicts."""
+    rows: list[tuple[str, str, str, str, str, str | None]] = []
+    for ann in annotations:
+        ts_sql, end_sql = _annotation_time_sql_exprs(ann, all_day_timezone)
+        title = ann["title"]
+        text = ann.get("text") or ""
+        tags = ann.get("tags") or ""
+        locs = ann.get("locations")
+        if locs:
+            for loc in locs:
+                rows.append((ts_sql, end_sql, title, text, tags, loc))
+        else:
+            rows.append((ts_sql, end_sql, title, text, tags, None))
+
+    if not rows:
+        return 'SELECT NULL::timestamptz AS "time" WHERE false'
+
+    filter_by_location = any(ann.get("locations") for ann in annotations)
+
+    parts: list[str] = []
+    for ts_sql, end_sql, title, text, tags, site in rows:
+        if filter_by_location:
+            site_sql = "NULL" if site is None else _sql_string_literal(site)
+            parts.append(
+                "("
+                f"{ts_sql}, "
+                f"{end_sql}, "
+                f"{_sql_string_literal(title)}, "
+                f"{_sql_string_literal(text)}, "
+                f"{_sql_string_literal(tags)}, "
+                f"{site_sql})"
+            )
+        else:
+            parts.append(
+                "("
+                f"{ts_sql}, "
+                f"{end_sql}, "
+                f"{_sql_string_literal(title)}, "
+                f"{_sql_string_literal(text)}, "
+                f"{_sql_string_literal(tags)})"
+            )
+
+    values = ",\n  ".join(parts)
+    if filter_by_location:
+        from_clause = f"""FROM (VALUES
+  {values}
+) AS v(ts, ts_end, title, body, tag, site)"""
+        location_clause = "\n  AND (v.site IS NULL OR v.site IN ($location))"
+    else:
+        from_clause = f"""FROM (VALUES
+  {values}
+) AS v(ts, ts_end, title, body, tag)"""
+        location_clause = ""
+
+    return f"""SELECT
+  v.ts AS "time",
+  v.ts_end AS timeend,
+  (v.title || E'\\n' || COALESCE(v.body, '')) AS "text",
+  v.tag AS "tags"
+{from_clause}
+WHERE v.ts <= $__timeTo()
+  AND COALESCE(v.ts_end, v.ts) >= $__timeFrom(){location_clause}"""
+
 
 # Sprinkler runs as time series (for overlay on water usage chart)
 SQL_SPRINKLER_RUNS_TIMESERIES = """-- Generate time series for sprinkler runs
@@ -383,7 +499,8 @@ SELECT
   1 AS "Sprinkler Running"
 FROM sprinkler_runs sr
 JOIN locations l ON sr.location_id = l.id
-WHERE sr.start_time >= $__timeFrom() AND sr.end_time <= $__timeTo()
+WHERE sr.start_time <= $__timeTo()
+  AND sr.end_time >= $__timeFrom()
   AND l.name IN ($location)
 UNION ALL
 SELECT
@@ -392,7 +509,8 @@ SELECT
   0 AS "Sprinkler Running"
 FROM sprinkler_runs sr
 JOIN locations l ON sr.location_id = l.id
-WHERE sr.start_time >= $__timeFrom() AND sr.end_time <= $__timeTo()
+WHERE sr.start_time <= $__timeTo()
+  AND sr.end_time >= $__timeFrom()
   AND l.name IN ($location)
 ORDER BY "time" """
 
@@ -1127,6 +1245,31 @@ def sql_target(sql: str, ref_id: str = "A", format_mode: str = "time_series") ->
         format=format_mode,
         datasource=DATASOURCE,
     )
+
+
+def postgres_annotation_layer(name: str, sql: str, icon_color: str) -> dict[str, Any]:
+    """Dashboard annotation query for the Postgres datasource.
+
+    Panel queries use rawQuery=true + rawSql; annotation queries historically used the SQL
+    string in ``rawQuery`` directly. Newer Grafana resolves ``target.rawSql``. We set all
+    compatible shapes so the query actually runs.
+    """
+    return {
+        "datasource": DATASOURCE,
+        "enable": True,
+        "hide": False,
+        "iconColor": icon_color,
+        "name": name,
+        "rawQuery": sql,
+        "query": sql,
+        "target": {
+            "editorMode": "code",
+            "format": "table",
+            "rawQuery": True,
+            "rawSql": sql,
+            "refId": "AnnotationQuery",
+        },
+    }
 
 
 def power_gauge(
@@ -3705,9 +3848,20 @@ def create_panels() -> list[dict[str, Any]]:
 
 def create_dashboard() -> dict[str, Any]:
     """Create the complete Grafana dashboard."""
+    anno_cfg = load_dashboard_annotations_config()
+    annotations = anno_cfg["annotations"]
+    all_day_tz = anno_cfg.get("all_day_timezone") or DEFAULT_ANNOTATIONS_ALL_DAY_TZ
+    codified_sql = build_sql_codified_annotations(annotations, all_day_timezone=all_day_tz)
+
     return {
         "uid": DASHBOARD_UID,
         "title": DASHBOARD_TITLE,
+        "description": (
+            "Optional purple Annotations load from annotations.json (gitignored) or "
+            "ANNOTATIONS_CONFIG_PATH; see annotations.example.json in the repo. "
+            "Entries with locations[] only show when those sites are selected in Site. "
+            "Zoom the time picker to include your event dates."
+        ),
         "tags": [
             "power",
             "solar",
@@ -3784,15 +3938,16 @@ def create_dashboard() -> dict[str, Any]:
                     "name": "Annotations & Alerts",
                     "type": "dashboard",
                 },
-                {
-                    "datasource": DATASOURCE,
-                    "enable": True,
-                    "hide": False,
-                    "iconColor": "green",
-                    "name": "Sprinkler Runs",
-                    "rawQuery": True,
-                    "query": SQL_SPRINKLER_RUNS_ANNOTATIONS,
-                },
+                postgres_annotation_layer(
+                    "Annotations",
+                    codified_sql,
+                    "purple",
+                ),
+                postgres_annotation_layer(
+                    "Sprinkler Runs",
+                    SQL_SPRINKLER_RUNS_ANNOTATIONS,
+                    "green",
+                ),
             ]
         },
         "editable": True,

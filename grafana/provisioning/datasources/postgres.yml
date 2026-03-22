@@ -1,7 +1,10 @@
 apiVersion: 1
 
+# uid: stable id for API/UI; the home dashboard resolves this datasource by name
+# ("Home Monitor PostgreSQL") so it works even if an older install used another uid.
 datasources:
   - name: Home Monitor PostgreSQL
+    uid: home-monitor-postgres
     type: postgres
     access: proxy
     url: postgres:5432
