@@ -41,6 +41,9 @@ LEGEND_CALCS_STANDARD = ["lastNotNull", "max", "mean"]
 LEGEND_CALCS_WITH_SUM = ["lastNotNull", "max", "mean", "sum"]
 LEGEND_CALCS_BATTERY = ["lastNotNull", "min", "max", "mean"]
 
+# Gauge max for Tesla daily export (kWh); must match fieldConfig override on combined panel.
+TESLA_EXPORT_GAUGE_MAX_KWH = 80.0
+
 
 def threshold(color: str, value: float | None = None) -> dict[str, Any]:
     """Create a threshold step. value=None means base/default threshold."""
@@ -50,47 +53,6 @@ def threshold(color: str, value: float | None = None) -> dict[str, Any]:
 # =============================================================================
 # SQL QUERIES
 # =============================================================================
-
-SQL_CURRENT_PRODUCTION_CONSUMPTION = """WITH latest_bucket AS (
-  SELECT location_id, source, MAX(date_trunc('minute', timestamp)) as latest_minute
-  FROM power_readings
-  WHERE source IN ($source)
-  GROUP BY location_id, source
-),
-production_data AS (
-  SELECT
-    COALESCE(SUM(pr.power_produced) / 1000.0, 0) AS production_kw,
-    COALESCE(MAX(l.capacity_kw), 20) AS production_max
-  FROM power_readings pr
-  JOIN locations l ON pr.location_id = l.id
-  JOIN latest_bucket lb ON pr.location_id = lb.location_id
-    AND pr.source = lb.source
-    AND date_trunc('minute', pr.timestamp) = lb.latest_minute
-  WHERE pr.power_produced IS NOT NULL
-    AND l.name IN ($location)
-    AND pr.source IN ($source)
-),
-consumption_data AS (
-  SELECT
-    COALESCE(SUM(pr.power_consumed) / 1000.0, 0) AS consumption_kw,
-    COALESCE(MAX(l.capacity_kw * 1.15), 20) AS consumption_max
-  FROM power_readings pr
-  JOIN locations l ON pr.location_id = l.id
-  JOIN latest_bucket lb ON pr.location_id = lb.location_id
-    AND pr.source = lb.source
-    AND date_trunc('minute', pr.timestamp) = lb.latest_minute
-  WHERE pr.power_consumed IS NOT NULL
-    AND l.name IN ($location)
-    AND pr.source IN ($source)
-)
-SELECT
-  COALESCE((SELECT production_kw FROM production_data), 0) AS "Production (kW)",
-  COALESCE((SELECT consumption_kw FROM consumption_data), 0) AS "Consumption (kW)",
-  GREATEST(
-    COALESCE((SELECT production_max FROM production_data), 20),
-    COALESCE((SELECT consumption_max FROM consumption_data), 20)
-  ) AS "Max"
-"""
 
 SQL_CURRENT_PRODUCTION = """WITH latest_bucket AS (
   SELECT location_id, source, MAX(date_trunc('minute', timestamp)) as latest_minute
@@ -426,6 +388,113 @@ DEFAULT_ANNOTATIONS_ALL_DAY_TZ = "America/New_York"
 
 def _sql_string_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _tesla_export_day_ctes(tz_lit: str) -> str:
+    """Shared CTEs: bounds → minute_power → ordered → segments (Tesla export integration)."""
+    return f"""bounds AS (
+  SELECT
+    (date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE {tz_lit}) AT TIME ZONE {tz_lit}) AS start_utc,
+    ((date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE {tz_lit}) + interval '1 day') AT TIME ZONE {tz_lit}) AS end_utc
+),
+minute_power AS (
+  SELECT
+    pr.location_id,
+    date_trunc('minute', pr.timestamp) AS ts_min,
+    SUM(COALESCE(pr.power_exported, 0::float8))::float8 AS export_w
+  FROM power_readings pr
+  JOIN locations l ON pr.location_id = l.id
+  CROSS JOIN bounds b
+  WHERE pr.source = 'tesla'
+    AND l.name IN ($location)
+    AND pr.timestamp >= b.start_utc
+    AND pr.timestamp < b.end_utc
+  GROUP BY pr.location_id, date_trunc('minute', pr.timestamp)
+),
+ordered AS (
+  SELECT
+    location_id,
+    ts_min,
+    export_w,
+    LEAD(ts_min) OVER (PARTITION BY location_id ORDER BY ts_min) AS next_ts,
+    LEAD(export_w) OVER (PARTITION BY location_id ORDER BY ts_min) AS next_w
+  FROM minute_power
+),
+segments AS (
+  SELECT
+    o.location_id,
+    CASE
+      WHEN o.next_ts IS NOT NULL THEN
+        EXTRACT(EPOCH FROM (o.next_ts - o.ts_min))
+        * (o.export_w + COALESCE(o.next_w, o.export_w)) / 2.0
+      ELSE
+        EXTRACT(EPOCH FROM (
+          LEAST(CURRENT_TIMESTAMP, (SELECT end_utc FROM bounds)) - o.ts_min
+        )) * o.export_w
+    END / 3600000.0 AS kwh
+  FROM ordered o
+)"""
+
+
+def sql_tesla_exported_today_kwh(all_day_timezone: str) -> str:
+    """Standalone query: daily Tesla grid export (kWh); used by tests and ad-hoc panels."""
+    tz_lit = _sql_string_literal(all_day_timezone)
+    return f"""WITH {_tesla_export_day_ctes(tz_lit)}
+SELECT
+  COALESCE((SELECT SUM(kwh) FROM segments), 0) AS "Exported Today (kWh)",
+  {TESLA_EXPORT_GAUGE_MAX_KWH!s}::float8 AS "Max"
+"""
+
+
+def sql_current_production_consumption_export(all_day_timezone: str) -> str:
+    """Latest production/consumption (kW) plus Tesla export today (kWh); ignores Grafana range for export."""
+    tz_lit = _sql_string_literal(all_day_timezone)
+    tesla_ctes = _tesla_export_day_ctes(tz_lit)
+    return f"""WITH latest_bucket AS (
+  SELECT location_id, source, MAX(date_trunc('minute', timestamp)) as latest_minute
+  FROM power_readings
+  WHERE source IN ($source)
+  GROUP BY location_id, source
+),
+production_data AS (
+  SELECT
+    COALESCE(SUM(pr.power_produced) / 1000.0, 0) AS production_kw,
+    COALESCE(MAX(l.capacity_kw), 20) AS production_max
+  FROM power_readings pr
+  JOIN locations l ON pr.location_id = l.id
+  JOIN latest_bucket lb ON pr.location_id = lb.location_id
+    AND pr.source = lb.source
+    AND date_trunc('minute', pr.timestamp) = lb.latest_minute
+  WHERE pr.power_produced IS NOT NULL
+    AND l.name IN ($location)
+    AND pr.source IN ($source)
+),
+consumption_data AS (
+  SELECT
+    COALESCE(SUM(pr.power_consumed) / 1000.0, 0) AS consumption_kw,
+    COALESCE(MAX(l.capacity_kw * 1.15), 20) AS consumption_max
+  FROM power_readings pr
+  JOIN locations l ON pr.location_id = l.id
+  JOIN latest_bucket lb ON pr.location_id = lb.location_id
+    AND pr.source = lb.source
+    AND date_trunc('minute', pr.timestamp) = lb.latest_minute
+  WHERE pr.power_consumed IS NOT NULL
+    AND l.name IN ($location)
+    AND pr.source IN ($source)
+),
+{tesla_ctes},
+export_today AS (
+  SELECT COALESCE(SUM(kwh), 0) AS export_kwh FROM segments
+)
+SELECT
+  COALESCE((SELECT production_kw FROM production_data), 0) AS "Production (kW)",
+  COALESCE((SELECT consumption_kw FROM consumption_data), 0) AS "Consumption (kW)",
+  COALESCE((SELECT export_kwh FROM export_today), 0) AS "Exported Today (kWh)",
+  GREATEST(
+    COALESCE((SELECT production_max FROM production_data), 20),
+    COALESCE((SELECT consumption_max FROM consumption_data), 20)
+  ) AS "Max"
+"""
 
 
 def _next_calendar_day_iso(cal: str) -> str:
@@ -1318,9 +1387,12 @@ def power_gauge(
     field_name: str,
     thresholds: list[dict[str, Any]],
     panel_id: int,
+    *,
+    unit: str = "kwatt",
+    description: str = "",
 ) -> dict[str, Any]:
     """Create a gauge panel for power readings with dynamic max from data."""
-    return {
+    panel: dict[str, Any] = {
         "id": panel_id,
         "gridPos": {"h": pos.h, "w": pos.w, "x": pos.x, "y": pos.y},
         "type": "gauge",
@@ -1344,13 +1416,22 @@ def power_gauge(
                     "mode": "percentage",
                     "steps": thresholds,
                 },
-                "unit": "kwatt",
+                "unit": unit,
             },
             "overrides": [
                 {
                     "matcher": {"id": "byName", "options": field_name},
                     "properties": [
                         {"id": "displayName", "value": field_name},
+                    ],
+                },
+                {
+                    "matcher": {"id": "byName", "options": "Max"},
+                    "properties": [
+                        {
+                            "id": "custom.hideFrom",
+                            "value": {"tooltip": True, "viz": True, "legend": False},
+                        },
                     ],
                 },
             ],
@@ -1378,6 +1459,9 @@ def power_gauge(
             },
         ],
     }
+    if description:
+        panel["description"] = description
+    return panel
 
 
 def combined_power_gauge(
@@ -1387,9 +1471,11 @@ def combined_power_gauge(
     panel_id: int,
     production_thresholds: list[dict[str, Any]],
     consumption_thresholds: list[dict[str, Any]],
+    export_thresholds: list[dict[str, Any]],
+    description: str = "",
 ) -> dict[str, Any]:
-    """Create a combined gauge panel showing both Production and Consumption."""
-    return {
+    """Create a combined gauge panel: Production, Consumption, and Tesla export today (kWh)."""
+    panel: dict[str, Any] = {
         "id": panel_id,
         "gridPos": {"h": pos.h, "w": pos.w, "x": pos.x, "y": pos.y},
         "type": "gauge",
@@ -1443,6 +1529,21 @@ def combined_power_gauge(
                     ],
                 },
                 {
+                    "matcher": {"id": "byName", "options": "Exported Today (kWh)"},
+                    "properties": [
+                        {"id": "displayName", "value": "Exported Today (kWh)"},
+                        {"id": "unit", "value": "kwatth"},
+                        {"id": "max", "value": TESLA_EXPORT_GAUGE_MAX_KWH},
+                        {
+                            "id": "thresholds",
+                            "value": {
+                                "mode": "percentage",
+                                "steps": export_thresholds,
+                            },
+                        },
+                    ],
+                },
+                {
                     "matcher": {"id": "byName", "options": "Max"},
                     "properties": [
                         {
@@ -1483,12 +1584,16 @@ def combined_power_gauge(
                     "indexByName": {
                         "Production (kW)": 0,
                         "Consumption (kW)": 1,
+                        "Exported Today (kWh)": 2,
                     },
                     "renameByName": {},
                 },
             },
         ],
     }
+    if description:
+        panel["description"] = description
+    return panel
 
 
 def power_timeseries(
@@ -1727,15 +1832,15 @@ def color_override(pattern: str, color: str) -> dict:
 # =============================================================================
 
 
-def create_panels() -> list[dict[str, Any]]:
+def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> list[dict[str, Any]]:
     """Create all dashboard panels."""
     panels = []
 
-    # Row 1: Current Production/Consumption (combined) - larger panel
+    # Row 1: Production, Consumption, and Tesla export today (single panel, three gauges)
     panels.append(
         combined_power_gauge(
             title="Current Production + Consumption",
-            sql=SQL_CURRENT_PRODUCTION_CONSUMPTION,
+            sql=sql_current_production_consumption_export(all_day_timezone),
             pos=GridPos(h=5, w=12, x=0, y=0),
             panel_id=9,
             production_thresholds=[
@@ -1750,6 +1855,18 @@ def create_panels() -> list[dict[str, Any]]:
                 threshold(ORANGE, 75),
                 threshold(RED, 90),
             ],
+            export_thresholds=[
+                threshold(RED),
+                threshold(ORANGE, 15),
+                threshold(YELLOW, 35),
+                threshold(GREEN, 60),
+            ],
+            description=(
+                "Exported Today (kWh): Tesla `power_exported` integrated from local midnight to "
+                "now (IANA zone from annotations.json `all_day_timezone`, default "
+                "America/New_York). Ignores the dashboard time range; always Tesla, not the Data "
+                "Source variable."
+            ),
         )
     )
 
@@ -3965,7 +4082,7 @@ def create_dashboard() -> dict[str, Any]:
                 },
             ]
         },
-        "panels": create_panels(),
+        "panels": create_panels(all_day_timezone=all_day_tz),
         "annotations": {
             "list": [
                 {

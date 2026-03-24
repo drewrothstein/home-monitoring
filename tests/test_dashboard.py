@@ -11,8 +11,10 @@ from scripts.generate_dashboard import (
     create_panels,
     DEFAULT_ANNOTATIONS_ALL_DAY_TZ,
     sql_battery_soc,
+    sql_current_production_consumption_export,
     SQL_BATTERY_SOC_TIMESERIES,
     SQL_SPRINKLER_RUNS_ANNOTATIONS,
+    sql_tesla_exported_today_kwh,
     sql_target,
     threshold,
 )
@@ -61,6 +63,30 @@ class TestSqlTarget:
         assert result.refId == "B"
         assert result.format == "table"
         assert result.datasource == "Home Monitor PostgreSQL"
+
+
+class TestSqlTeslaExportedToday:
+    """Tesla daily export query (integrates power_exported, ignores Grafana range)."""
+
+    def test_sql_contains_tesla_source_and_timezone_literal(self):
+        sql = sql_tesla_exported_today_kwh("America/Chicago")
+        assert "source = 'tesla'" in sql
+        assert "'America/Chicago'" in sql
+        assert "Exported Today (kWh)" in sql
+        assert "$location" in sql
+
+
+class TestSqlCurrentProductionConsumptionExport:
+    """Merged top-row gauge query (production, consumption, Tesla export today)."""
+
+    def test_sql_includes_all_three_metrics(self):
+        sql = sql_current_production_consumption_export("America/Los_Angeles")
+        assert "Production (kW)" in sql
+        assert "Consumption (kW)" in sql
+        assert "Exported Today (kWh)" in sql
+        assert "source = 'tesla'" in sql
+        assert "'America/Los_Angeles'" in sql
+        assert "$source" in sql
 
 
 class TestSqlBatterySocTimeseries:
@@ -152,6 +178,12 @@ class TestCreatePanels:
         titles = [panel.get("title", "") for panel in panels]
         assert any("Production" in title and "Consumption" in title for title in titles)
         assert any("Battery SoC" in title for title in titles)
+        hero = next(p for p in panels if p.get("id") == 9)
+        assert "Exported Today (kWh)" in hero["targets"][0]["rawSql"]
+        overrides = hero["fieldConfig"]["overrides"]
+        assert any(
+            o.get("matcher", {}).get("options") == "Exported Today (kWh)" for o in overrides
+        )
 
 
 class TestCreateDashboard:
