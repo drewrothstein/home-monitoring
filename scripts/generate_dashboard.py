@@ -241,7 +241,8 @@ ORDER BY "time" """
 
 SQL_BATTERY_SOC_TIMESERIES = """-- One point per physical battery per minute (dedupe duplicate inserts / fetch cycles)
 -- Identity: battery_bank_id, else battery.index, else Tesla energy_site_id (one Grafana location, multiple sites),
--- else row id. ROW_NUMBER is scoped per (location, minute, energy_site_id) for multi-battery legacy rows.
+-- else row id.
+-- Legend suffix: count of rows in battery_banks per energy_site_id -> Single/Double/Triple/N batteries.
 WITH deduped AS (
   SELECT DISTINCT ON (
     br.location_id,
@@ -280,27 +281,26 @@ SELECT
     WHEN NULLIF(BTRIM(d.raw_data->>'energy_site_id'), '') IS NOT NULL
     THEN '[' || RIGHT(BTRIM(d.raw_data->>'energy_site_id'), 6) || '] '
     ELSE ''
-  END || '- System ' || (
-    COALESCE(
-      (bb.battery_index + 1),
-      CASE
-        WHEN d.raw_data#>>'{battery,index}' IS NOT NULL
-        THEN (d.raw_data#>>'{battery,index}')::integer + 1
-        ELSE NULL
-      END,
-      ROW_NUMBER() OVER (
-        PARTITION BY
-          d.location_id,
-          date_trunc('minute', d.timestamp),
-          COALESCE(NULLIF(BTRIM(d.raw_data->>'energy_site_id'), ''), '')
-        ORDER BY d.id
-      )
-    )
-  )::text AS metric,
+  END || '- ' || (
+    CASE COALESCE(bbc.n, 1)
+      WHEN 1 THEN 'Single'
+      WHEN 2 THEN 'Double'
+      WHEN 3 THEN 'Triple'
+      ELSE COALESCE(bbc.n, 1)::text || ' batteries'
+    END
+  ) AS metric,
   d.state_of_charge AS "State of Charge (%)"
 FROM deduped d
 JOIN locations l ON d.location_id = l.id
 LEFT JOIN battery_banks bb ON bb.id = d.battery_bank_id
+LEFT JOIN (
+  SELECT energy_site_id, COUNT(*)::int AS n
+  FROM battery_banks
+  GROUP BY energy_site_id
+) bbc ON bbc.energy_site_id = COALESCE(
+  bb.energy_site_id,
+  NULLIF(BTRIM(d.raw_data->>'energy_site_id'), '')
+)
 WHERE l.name IN ($location)
 ORDER BY "time", l.name, metric"""
 
@@ -2122,7 +2122,7 @@ def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> lis
             "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
             "type": "timeseries",
             "title": "Battery State of Charge by Site",
-            "description": "Per battery per minute; deduped. Multiple Tesla energy_site IDs under one location show as [suffix] in the legend. Legacy rows without energy_site_id may still split by row id.",
+            "description": "Per battery per minute; deduped. Multiple Tesla energy_site IDs under one location show as [suffix] in the legend. Bank count per energy site comes from battery_banks (Single / Double / …). Legacy rows without energy_site_id may still split by row id.",
             "targets": [
                 {
                     "datasource": DATASOURCE,

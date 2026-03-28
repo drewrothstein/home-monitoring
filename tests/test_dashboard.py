@@ -97,9 +97,11 @@ class TestSqlBatterySocTimeseries:
         assert "DISTINCT ON" in SQL_BATTERY_SOC_TIMESERIES
         assert "battery_banks" in SQL_BATTERY_SOC_TIMESERIES
         assert "battery_bank_id" in SQL_BATTERY_SOC_TIMESERIES
-        assert "{battery,index}" in SQL_BATTERY_SOC_TIMESERIES
-        assert "ROW_NUMBER()" in SQL_BATTERY_SOC_TIMESERIES
+        assert "raw_data->'battery'->>'index'" in SQL_BATTERY_SOC_TIMESERIES
         assert "energy_site_id" in SQL_BATTERY_SOC_TIMESERIES
+        assert "Single" in SQL_BATTERY_SOC_TIMESERIES
+        assert "Double" in SQL_BATTERY_SOC_TIMESERIES
+        assert "bbc.n" in SQL_BATTERY_SOC_TIMESERIES
 
 
 class TestSqlBatterySoc:
