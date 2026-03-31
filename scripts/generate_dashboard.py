@@ -390,37 +390,41 @@ def _sql_string_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _tesla_export_day_ctes(tz_lit: str) -> str:
+def _tesla_export_day_ctes(tz_lit: str, prefix: str = "") -> str:
     """Shared CTEs: bounds → minute_power → ordered → segments (Tesla export integration)."""
-    return f"""bounds AS (
+    bounds = f"{prefix}bounds"
+    minute_power = f"{prefix}minute_power"
+    ordered = f"{prefix}ordered"
+    segments = f"{prefix}segments"
+    return f"""{bounds} AS (
   SELECT
     (date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE {tz_lit}) AT TIME ZONE {tz_lit}) AS start_utc,
     ((date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE {tz_lit}) + interval '1 day') AT TIME ZONE {tz_lit}) AS end_utc
 ),
-minute_power AS (
+{minute_power} AS (
   SELECT
     pr.location_id,
     date_trunc('minute', pr.timestamp) AS ts_min,
     SUM(COALESCE(pr.power_exported, 0::float8))::float8 AS export_w
   FROM power_readings pr
   JOIN locations l ON pr.location_id = l.id
-  CROSS JOIN bounds b
+  CROSS JOIN {bounds} b
   WHERE pr.source = 'tesla'
     AND l.name IN ($location)
     AND pr.timestamp >= b.start_utc
     AND pr.timestamp < b.end_utc
   GROUP BY pr.location_id, date_trunc('minute', pr.timestamp)
 ),
-ordered AS (
+{ordered} AS (
   SELECT
     location_id,
     ts_min,
     export_w,
     LEAD(ts_min) OVER (PARTITION BY location_id ORDER BY ts_min) AS next_ts,
     LEAD(export_w) OVER (PARTITION BY location_id ORDER BY ts_min) AS next_w
-  FROM minute_power
+  FROM {minute_power}
 ),
-segments AS (
+{segments} AS (
   SELECT
     o.location_id,
     CASE
@@ -429,10 +433,60 @@ segments AS (
         * (o.export_w + COALESCE(o.next_w, o.export_w)) / 2.0
       ELSE
         EXTRACT(EPOCH FROM (
-          LEAST(CURRENT_TIMESTAMP, (SELECT end_utc FROM bounds)) - o.ts_min
+          LEAST(CURRENT_TIMESTAMP, (SELECT end_utc FROM {bounds})) - o.ts_min
         )) * o.export_w
     END / 3600000.0 AS kwh
-  FROM ordered o
+  FROM {ordered} o
+)"""
+
+
+def _tesla_import_day_ctes(tz_lit: str, prefix: str = "") -> str:
+    """Shared CTEs: bounds → minute_power → ordered → segments (Tesla import integration)."""
+    bounds = f"{prefix}bounds"
+    minute_power = f"{prefix}minute_power"
+    ordered = f"{prefix}ordered"
+    segments = f"{prefix}segments"
+    return f"""{bounds} AS (
+  SELECT
+    (date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE {tz_lit}) AT TIME ZONE {tz_lit}) AS start_utc,
+    ((date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE {tz_lit}) + interval '1 day') AT TIME ZONE {tz_lit}) AS end_utc
+),
+{minute_power} AS (
+  SELECT
+    pr.location_id,
+    date_trunc('minute', pr.timestamp) AS ts_min,
+    SUM(COALESCE(pr.power_imported, 0::float8))::float8 AS import_w
+  FROM power_readings pr
+  JOIN locations l ON pr.location_id = l.id
+  CROSS JOIN {bounds} b
+  WHERE pr.source = 'tesla'
+    AND l.name IN ($location)
+    AND pr.timestamp >= b.start_utc
+    AND pr.timestamp < b.end_utc
+  GROUP BY pr.location_id, date_trunc('minute', pr.timestamp)
+),
+{ordered} AS (
+  SELECT
+    location_id,
+    ts_min,
+    import_w,
+    LEAD(ts_min) OVER (PARTITION BY location_id ORDER BY ts_min) AS next_ts,
+    LEAD(import_w) OVER (PARTITION BY location_id ORDER BY ts_min) AS next_w
+  FROM {minute_power}
+),
+{segments} AS (
+  SELECT
+    o.location_id,
+    CASE
+      WHEN o.next_ts IS NOT NULL THEN
+        EXTRACT(EPOCH FROM (o.next_ts - o.ts_min))
+        * (o.import_w + COALESCE(o.next_w, o.import_w)) / 2.0
+      ELSE
+        EXTRACT(EPOCH FROM (
+          LEAST(CURRENT_TIMESTAMP, (SELECT end_utc FROM {bounds})) - o.ts_min
+        )) * o.import_w
+    END / 3600000.0 AS kwh
+  FROM {ordered} o
 )"""
 
 
@@ -447,9 +501,10 @@ SELECT
 
 
 def sql_current_production_consumption_export(all_day_timezone: str) -> str:
-    """Latest production/consumption (kW) plus Tesla export today (kWh); ignores Grafana range for export."""
+    """Latest production/consumption plus Tesla import/export today (kWh); ignores Grafana range."""
     tz_lit = _sql_string_literal(all_day_timezone)
-    tesla_ctes = _tesla_export_day_ctes(tz_lit)
+    tesla_export_ctes = _tesla_export_day_ctes(tz_lit, prefix="export_")
+    tesla_import_ctes = _tesla_import_day_ctes(tz_lit, prefix="import_")
     return f"""WITH latest_bucket AS (
   SELECT location_id, source, MAX(date_trunc('minute', timestamp)) as latest_minute
   FROM power_readings
@@ -482,13 +537,18 @@ consumption_data AS (
     AND l.name IN ($location)
     AND pr.source IN ($source)
 ),
-{tesla_ctes},
+{tesla_export_ctes},
 export_today AS (
-  SELECT COALESCE(SUM(kwh), 0) AS export_kwh FROM segments
+  SELECT COALESCE(SUM(kwh), 0) AS export_kwh FROM export_segments
+),
+{tesla_import_ctes},
+import_today AS (
+  SELECT COALESCE(SUM(kwh), 0) AS import_kwh FROM import_segments
 )
 SELECT
   COALESCE((SELECT production_kw FROM production_data), 0) AS "Production (kW)",
   COALESCE((SELECT consumption_kw FROM consumption_data), 0) AS "Consumption (kW)",
+  COALESCE((SELECT import_kwh FROM import_today), 0) AS "Imported Today (kWh)",
   COALESCE((SELECT export_kwh FROM export_today), 0) AS "Exported Today (kWh)",
   GREATEST(
     COALESCE((SELECT production_max FROM production_data), 20),
@@ -1471,10 +1531,11 @@ def combined_power_gauge(
     panel_id: int,
     production_thresholds: list[dict[str, Any]],
     consumption_thresholds: list[dict[str, Any]],
+    import_thresholds: list[dict[str, Any]],
     export_thresholds: list[dict[str, Any]],
     description: str = "",
 ) -> dict[str, Any]:
-    """Create a combined gauge panel: Production, Consumption, and Tesla export today (kWh)."""
+    """Create a combined gauge panel: Production/Consumption and Tesla daily import/export (kWh)."""
     panel: dict[str, Any] = {
         "id": panel_id,
         "gridPos": {"h": pos.h, "w": pos.w, "x": pos.x, "y": pos.y},
@@ -1524,6 +1585,21 @@ def combined_power_gauge(
                             "value": {
                                 "mode": "percentage",
                                 "steps": consumption_thresholds,
+                            },
+                        },
+                    ],
+                },
+                {
+                    "matcher": {"id": "byName", "options": "Imported Today (kWh)"},
+                    "properties": [
+                        {"id": "displayName", "value": "Imported Today (kWh)"},
+                        {"id": "unit", "value": "kwatth"},
+                        {"id": "max", "value": TESLA_EXPORT_GAUGE_MAX_KWH},
+                        {
+                            "id": "thresholds",
+                            "value": {
+                                "mode": "percentage",
+                                "steps": import_thresholds,
                             },
                         },
                     ],
@@ -1584,7 +1660,8 @@ def combined_power_gauge(
                     "indexByName": {
                         "Production (kW)": 0,
                         "Consumption (kW)": 1,
-                        "Exported Today (kWh)": 2,
+                        "Imported Today (kWh)": 2,
+                        "Exported Today (kWh)": 3,
                     },
                     "renameByName": {},
                 },
@@ -1855,6 +1932,12 @@ def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> lis
                 threshold(ORANGE, 75),
                 threshold(RED, 90),
             ],
+            import_thresholds=[
+                threshold(RED),
+                threshold(ORANGE, 15),
+                threshold(YELLOW, 35),
+                threshold(GREEN, 60),
+            ],
             export_thresholds=[
                 threshold(RED),
                 threshold(ORANGE, 15),
@@ -1862,10 +1945,10 @@ def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> lis
                 threshold(GREEN, 60),
             ],
             description=(
-                "Exported Today (kWh): Tesla `power_exported` integrated from local midnight to "
-                "now (IANA zone from annotations.json `all_day_timezone`, default "
-                "America/New_York). Ignores the dashboard time range; always Tesla, not the Data "
-                "Source variable."
+                "Imported/Exported Today (kWh): Tesla `power_imported`/`power_exported` integrated "
+                "from local midnight to now (IANA zone from annotations.json "
+                "`all_day_timezone`, default America/New_York). Ignores the dashboard time range; "
+                "always Tesla, not the Data Source variable."
             ),
         )
     )
