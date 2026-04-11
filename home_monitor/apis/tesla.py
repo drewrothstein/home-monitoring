@@ -57,6 +57,14 @@ class TeslaApiClient:
         Raises:
             TeslaApiError: If response cannot be parsed as JSON
         """
+        if response.status_code >= 400:
+            snippet = (response.text or "").strip()[:800]
+            logger.error(
+                "Teslemetry API HTTP %s for %s: %s",
+                response.status_code,
+                endpoint,
+                snippet or "(empty body)",
+            )
         response.raise_for_status()
 
         # Check for empty response
