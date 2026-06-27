@@ -14,9 +14,7 @@ from home_monitor.annotations_config import (
 
 class TestValidateAnnotationEntry:
     def test_all_day_single_date(self):
-        validate_annotation_entry(
-            {"all_day": True, "date": "2025-01-01", "title": "x"}, 0
-        )
+        validate_annotation_entry({"all_day": True, "date": "2025-01-01", "title": "x"}, 0)
 
     def test_all_day_range(self):
         validate_annotation_entry(

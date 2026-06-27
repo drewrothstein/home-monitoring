@@ -119,6 +119,16 @@ class PruneSpanCircuitsResponse(BaseModel):
     message: str
 
 
+class GenerateReportResponse(BaseModel):
+    """Response model for report generation."""
+
+    period_type: str
+    subject: str
+    site_count: int
+    summary_ids: List[int]
+    message: str
+
+
 # =============================================================================
 # Endpoints
 # =============================================================================
@@ -246,6 +256,56 @@ async def prune_span_circuits(request: PruneSpanCircuitsRequest):
     except Exception as e:
         logger.error(f"Error during span circuit pruning: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to prune span circuits: {str(e)}")
+
+
+@app.post("/reports/generate", response_model=GenerateReportResponse, tags=["Reports"])
+async def generate_report(
+    period: str = "daily",
+    date: Optional[str] = None,
+    site: Optional[str] = None,
+    send: bool = True,
+):
+    """
+    Generate and optionally deliver a report for the given period.
+
+    Query params:
+    - period: daily, weekly, monthly, or yearly
+    - date: reference date YYYY-MM-DD (optional)
+    - site: single site name (optional, debug)
+    - send: deliver email if true (default true)
+    """
+    from datetime import date as date_type
+
+    from home_monitor.report.batch import run_report_batch
+
+    if period not in ("daily", "weekly", "monthly", "yearly"):
+        raise HTTPException(status_code=400, detail=f"Invalid period: {period}")
+
+    ref_date = None
+    if date:
+        try:
+            ref_date = date_type.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {date}")
+
+    try:
+        batch = run_report_batch(
+            period_type=period,
+            reference_date=ref_date,
+            send=send,
+            site_filter=site,
+            force=True,
+        )
+        return GenerateReportResponse(
+            period_type=period,
+            subject=batch.subject,
+            site_count=len(batch.site_summaries),
+            summary_ids=batch.summary_ids,
+            message=f"Generated {len(batch.site_summaries)} site summaries",
+        )
+    except Exception as e:
+        logger.error("Report generation failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate report: {str(e)}")
 
 
 # =============================================================================

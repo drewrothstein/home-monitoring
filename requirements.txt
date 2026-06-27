@@ -17,6 +17,10 @@ psutil==7.2.1
 # Dashboard generation
 grafanalib==0.7.1
 
+# Email reports
+mjml-python==1.4.0
+matplotlib==3.11.0
+
 # Code quality (dev dependencies)
 black==25.12.0
 isort==7.0.0

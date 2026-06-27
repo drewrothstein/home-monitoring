@@ -22,6 +22,9 @@ annotations.json
 # Generated Grafana dashboard (may embed annotation SQL; not committed)
 grafana/provisioning/dashboards/home-monitor.json
 
+# Generated report previews
+reports/output/
+
 # IDE
 .idea/
 .vscode/
