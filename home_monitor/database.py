@@ -1179,6 +1179,50 @@ def init_database():
             """
             )
 
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS report_summaries (
+                    id SERIAL PRIMARY KEY,
+                    location_id INTEGER NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+                    period_type VARCHAR(20) NOT NULL,
+                    period_start TIMESTAMPTZ NOT NULL,
+                    period_end TIMESTAMPTZ NOT NULL,
+                    generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    status VARCHAR(20) NOT NULL DEFAULT 'computed',
+                    metrics JSONB,
+                    error_message TEXT,
+                    raw_data JSONB,
+                    UNIQUE (location_id, period_type, period_start)
+                );
+                CREATE INDEX IF NOT EXISTS idx_report_summaries_period
+                    ON report_summaries(period_type, period_start DESC);
+                CREATE INDEX IF NOT EXISTS idx_report_summaries_location
+                    ON report_summaries(location_id, period_type, period_start DESC);
+            """
+            )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS report_deliveries (
+                    id SERIAL PRIMARY KEY,
+                    period_type VARCHAR(20) NOT NULL,
+                    period_start TIMESTAMPTZ NOT NULL,
+                    period_end TIMESTAMPTZ NOT NULL,
+                    generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    sent_at TIMESTAMPTZ,
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    recipient TEXT,
+                    subject TEXT,
+                    summary_ids INTEGER[],
+                    error_message TEXT,
+                    raw_data JSONB,
+                    UNIQUE (period_type, period_start)
+                );
+                CREATE INDEX IF NOT EXISTS idx_report_deliveries_period
+                    ON report_deliveries(period_type, period_start DESC);
+            """
+            )
+
         conn.commit()
 
     # Create enphase_app_tokens table (for multi-app support)
@@ -2793,3 +2837,248 @@ def aggregate_span_circuit_readings(
         "buckets_processed": buckets_processed,
         "net_reduction": rows_deleted - rows_inserted,
     }
+
+
+# =============================================================================
+# Report Summary Functions
+# =============================================================================
+
+
+def insert_report_summary(
+    location_id: int,
+    period_type: str,
+    period_start: datetime,
+    period_end: datetime,
+    metrics: Optional[Dict[str, Any]] = None,
+    status: str = "computed",
+    error_message: Optional[str] = None,
+    raw_data: Optional[Dict[str, Any]] = None,
+    generated_at: Optional[datetime] = None,
+) -> int:
+    """Insert or update a report summary for a site and period."""
+    generated_at = generated_at or datetime.now(timezone.utc)
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO report_summaries (
+                    location_id, period_type, period_start, period_end,
+                    generated_at, status, metrics, error_message, raw_data
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (location_id, period_type, period_start)
+                DO UPDATE SET
+                    period_end = EXCLUDED.period_end,
+                    generated_at = EXCLUDED.generated_at,
+                    status = EXCLUDED.status,
+                    metrics = EXCLUDED.metrics,
+                    error_message = EXCLUDED.error_message,
+                    raw_data = EXCLUDED.raw_data
+                RETURNING id
+                """,
+                (
+                    location_id,
+                    period_type,
+                    period_start,
+                    period_end,
+                    generated_at,
+                    status,
+                    json.dumps(metrics) if metrics is not None else None,
+                    error_message,
+                    json.dumps(raw_data) if raw_data is not None else None,
+                ),
+            )
+            return cur.fetchone()[0]
+
+
+def get_report_summary(
+    location_id: int,
+    period_type: str,
+    period_start: datetime,
+) -> Optional[Dict[str, Any]]:
+    """Get a report summary by site and period."""
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT rs.*, l.name AS location_name
+                FROM report_summaries rs
+                JOIN locations l ON rs.location_id = l.id
+                WHERE rs.location_id = %s
+                  AND rs.period_type = %s
+                  AND rs.period_start = %s
+                """,
+                (location_id, period_type, period_start),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def get_report_summaries_by_ids(summary_ids: List[int]) -> List[Dict[str, Any]]:
+    """Get report summaries by ID list."""
+    if not summary_ids:
+        return []
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT rs.*, l.name AS location_name
+                FROM report_summaries rs
+                JOIN locations l ON rs.location_id = l.id
+                WHERE rs.id = ANY(%s)
+                ORDER BY l.name
+                """,
+                (summary_ids,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def get_report_summaries_for_period(
+    period_type: str,
+    period_start: datetime,
+) -> List[Dict[str, Any]]:
+    """Get all site summaries for a given period batch."""
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT rs.*, l.name AS location_name
+                FROM report_summaries rs
+                JOIN locations l ON rs.location_id = l.id
+                WHERE rs.period_type = %s AND rs.period_start = %s
+                ORDER BY l.name
+                """,
+                (period_type, period_start),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def insert_report_delivery(
+    period_type: str,
+    period_start: datetime,
+    period_end: datetime,
+    recipient: str,
+    subject: str,
+    summary_ids: List[int],
+    status: str = "pending",
+    sent_at: Optional[datetime] = None,
+    error_message: Optional[str] = None,
+    raw_data: Optional[Dict[str, Any]] = None,
+    generated_at: Optional[datetime] = None,
+) -> int:
+    """Insert or update a report delivery record."""
+    generated_at = generated_at or datetime.now(timezone.utc)
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO report_deliveries (
+                    period_type, period_start, period_end, generated_at,
+                    sent_at, status, recipient, subject, summary_ids,
+                    error_message, raw_data
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (period_type, period_start)
+                DO UPDATE SET
+                    period_end = EXCLUDED.period_end,
+                    generated_at = EXCLUDED.generated_at,
+                    sent_at = EXCLUDED.sent_at,
+                    status = EXCLUDED.status,
+                    recipient = EXCLUDED.recipient,
+                    subject = EXCLUDED.subject,
+                    summary_ids = EXCLUDED.summary_ids,
+                    error_message = EXCLUDED.error_message,
+                    raw_data = EXCLUDED.raw_data
+                RETURNING id
+                """,
+                (
+                    period_type,
+                    period_start,
+                    period_end,
+                    generated_at,
+                    sent_at,
+                    status,
+                    recipient,
+                    subject,
+                    summary_ids,
+                    error_message,
+                    json.dumps(raw_data) if raw_data is not None else None,
+                ),
+            )
+            return cur.fetchone()[0]
+
+
+def get_report_delivery(
+    period_type: str,
+    period_start: datetime,
+) -> Optional[Dict[str, Any]]:
+    """Get a report delivery by period."""
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT * FROM report_deliveries
+                WHERE period_type = %s AND period_start = %s
+                """,
+                (period_type, period_start),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+
+def prune_report_summaries(keep_counts: Optional[Dict[str, int]] = None) -> int:
+    """Delete old report summaries, keeping recent rows per period type."""
+    defaults = {
+        "daily": 90,
+        "weekly": 52,
+        "monthly": 24,
+        "yearly": 10,
+    }
+    keep_counts = keep_counts or defaults
+    total_deleted = 0
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for period_type, keep in keep_counts.items():
+                cur.execute(
+                    """
+                    DELETE FROM report_summaries
+                    WHERE period_type = %s
+                      AND id NOT IN (
+                          SELECT id FROM report_summaries
+                          WHERE period_type = %s
+                          ORDER BY period_start DESC
+                          LIMIT %s
+                      )
+                    """,
+                    (period_type, period_type, keep),
+                )
+                total_deleted += cur.rowcount
+    return total_deleted
+
+
+def prune_report_deliveries(keep_counts: Optional[Dict[str, int]] = None) -> int:
+    """Delete old report deliveries, keeping recent rows per period type."""
+    defaults = {
+        "daily": 90,
+        "weekly": 52,
+        "monthly": 24,
+        "yearly": 10,
+    }
+    keep_counts = keep_counts or defaults
+    total_deleted = 0
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for period_type, keep in keep_counts.items():
+                cur.execute(
+                    """
+                    DELETE FROM report_deliveries
+                    WHERE period_type = %s
+                      AND id NOT IN (
+                          SELECT id FROM report_deliveries
+                          WHERE period_type = %s
+                          ORDER BY period_start DESC
+                          LIMIT %s
+                      )
+                    """,
+                    (period_type, period_type, keep),
+                )
+                total_deleted += cur.rowcount
+    return total_deleted

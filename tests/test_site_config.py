@@ -209,7 +209,10 @@ class TestValidateSiteConfig:
         site_config = {
             "capacity_kw": 10.0,
             "openweather": {"longitude": -74.0},
-            "location": {"latitude": 40.7, "longitude": -74.0},  # Provide coordinates via location block
+            "location": {
+                "latitude": 40.7,
+                "longitude": -74.0,
+            },  # Provide coordinates via location block
         }
         with pytest.raises(ValueError, match="openweather.latitude.*required"):
             validate_site_config("NY", site_config)

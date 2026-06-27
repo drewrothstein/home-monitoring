@@ -271,3 +271,45 @@ def get_span_circuit_fetch_interval_minutes() -> int:
         return int(os.getenv("SPAN_CIRCUIT_FETCH_INTERVAL_MINUTES", "15"))
     except ValueError:
         return 15
+
+
+def get_report_config() -> dict:
+    """Report email and scheduling configuration from environment."""
+
+    def _bool(key: str, default: str = "true") -> bool:
+        return os.getenv(key, default).lower() in ("1", "true", "yes")
+
+    try:
+        smtp_port = int(os.getenv("REPORT_SMTP_PORT", "587"))
+    except ValueError:
+        smtp_port = 587
+
+    try:
+        daily_hour = int(os.getenv("REPORT_DAILY_HOUR", "7"))
+    except ValueError:
+        daily_hour = 7
+
+    try:
+        check_interval = int(os.getenv("REPORT_CHECK_INTERVAL_MINUTES", "60"))
+    except ValueError:
+        check_interval = 60
+
+    return {
+        "email_mode": os.getenv("REPORT_EMAIL_MODE", "file").lower(),
+        "email_to": os.getenv("REPORT_EMAIL_TO", ""),
+        "email_from": os.getenv("REPORT_EMAIL_FROM", "home-monitor@localhost"),
+        "smtp_host": os.getenv("REPORT_SMTP_HOST", "smtp.gmail.com"),
+        "smtp_port": smtp_port,
+        "smtp_user": os.getenv("REPORT_SMTP_USER", ""),
+        "smtp_password": os.getenv("REPORT_SMTP_PASSWORD", ""),
+        "smtp_use_tls": _bool("REPORT_SMTP_USE_TLS", "true"),
+        "resend_api_key": os.getenv("REPORT_RESEND_API_KEY", ""),
+        "resend_api_url": os.getenv("REPORT_RESEND_API_URL", "https://api.resend.com/emails"),
+        "send_timezone": os.getenv("REPORT_SEND_TIMEZONE", "America/New_York"),
+        "daily_enabled": _bool("REPORT_DAILY_ENABLED", "true"),
+        "weekly_enabled": _bool("REPORT_WEEKLY_ENABLED", "true"),
+        "monthly_enabled": _bool("REPORT_MONTHLY_ENABLED", "true"),
+        "yearly_enabled": _bool("REPORT_YEARLY_ENABLED", "true"),
+        "daily_hour": daily_hour,
+        "check_interval_minutes": check_interval,
+    }

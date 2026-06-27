@@ -4,18 +4,18 @@ import pytest
 from grafanalib.core import GridPos, SqlTarget
 
 from scripts.generate_dashboard import (
+    DEFAULT_ANNOTATIONS_ALL_DAY_TZ,
+    SQL_BATTERY_SOC_TIMESERIES,
+    SQL_SPRINKLER_RUNS_ANNOTATIONS,
     _annotation_time_sql_exprs,
     build_sql_codified_annotations,
     color_override,
     create_dashboard,
     create_panels,
-    DEFAULT_ANNOTATIONS_ALL_DAY_TZ,
     sql_battery_soc,
     sql_current_production_consumption_export,
-    SQL_BATTERY_SOC_TIMESERIES,
-    SQL_SPRINKLER_RUNS_ANNOTATIONS,
-    sql_tesla_exported_today_kwh,
     sql_target,
+    sql_tesla_exported_today_kwh,
     threshold,
 )
 
@@ -183,9 +183,7 @@ class TestCreatePanels:
         hero = next(p for p in panels if p.get("id") == 9)
         assert "Exported Today (kWh)" in hero["targets"][0]["rawSql"]
         overrides = hero["fieldConfig"]["overrides"]
-        assert any(
-            o.get("matcher", {}).get("options") == "Exported Today (kWh)" for o in overrides
-        )
+        assert any(o.get("matcher", {}).get("options") == "Exported Today (kWh)" for o in overrides)
 
 
 class TestCreateDashboard:
@@ -243,17 +241,13 @@ class TestCreateDashboard:
         assert isinstance(anno.get("rawQuery"), str)
         assert anno["rawQuery"] == anno.get("query")
         assert anno["target"]["rawSql"] == anno["rawQuery"]
-        builtin = next(
-            a for a in annotations if a.get("name") == "Annotations & Alerts"
-        )
+        builtin = next(a for a in annotations if a.get("name") == "Annotations & Alerts")
         assert builtin.get("hide") is True
 
     def test_build_sql_codified_annotations_empty(self):
         """Empty codified list yields a no-op query."""
-        sql = build_sql_codified_annotations(
-            [], all_day_timezone=DEFAULT_ANNOTATIONS_ALL_DAY_TZ
-        )
-        assert 'WHERE false' in sql
+        sql = build_sql_codified_annotations([], all_day_timezone=DEFAULT_ANNOTATIONS_ALL_DAY_TZ)
+        assert "WHERE false" in sql
 
     def test_build_sql_codified_skips_location_when_no_sites(self):
         """No $location filter unless an entry uses locations (avoids anno query breakage)."""

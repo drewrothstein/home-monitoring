@@ -1030,6 +1030,7 @@ FastAPI provides interactive documentation:
 | `/config/sites` | GET | Get site configuration from sites.json |
 | `/last` | GET | Get last fetcher run summary and history |
 | `/prune/span/circuits` | POST | Aggregate and prune old span circuit readings |
+| `/reports/generate` | POST | Generate and deliver email report |
 
 ### Fetcher Run Tracking
 
@@ -1057,6 +1058,63 @@ This preserves energy totals while reducing granularity for older data:
 - Sums `import_energy_wh` and `export_energy_wh`
 - Keeps the latest timestamp per bucket
 
+## Email Reports
+
+The report service aggregates metrics from Postgres into `report_summaries`, renders a combined HTML email (one message with a section per site), and delivers via file preview, console, SMTP, or Resend (HTTP API).
+
+### Quick start (local preview)
+
+```bash
+# Preview report as HTML (writes to reports/output/)
+make report-preview PERIOD=daily
+
+# Preview and open in browser (macOS)
+make report-preview-open PERIOD=daily
+
+# Specific date or site
+make report-preview PERIOD=weekly DATE=2026-06-23 SITE=FL
+```
+
+### Sending via SMTP
+
+Configure `REPORT_EMAIL_*` and `REPORT_SMTP_*` in `.env` (see `env.example`), then:
+
+```bash
+make report-send PERIOD=daily
+```
+
+### Sending via Resend (recommended)
+
+[Resend](https://resend.com) is an email API with a generous free tier (3,000 emails/month) — more than enough for daily reports, and avoids storing a mailbox password. Create an API key, verify a sending domain (or use `onboarding@resend.dev` for testing), then set in `.env`:
+
+```bash
+REPORT_EMAIL_MODE=resend
+REPORT_EMAIL_TO=you@example.com          # comma-separated for multiple recipients
+REPORT_EMAIL_FROM=reports@your-domain.com   # must be on a verified domain
+REPORT_RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+```bash
+make report-send PERIOD=daily
+```
+
+Charts are embedded inline (attached with a matching `content_id`), so the email renders the same as SMTP delivery. `make report-send` and the scheduled reporter both honor `REPORT_EMAIL_MODE` from `.env`.
+
+### Scheduled reports
+
+```bash
+make reporter-start-local   # Docker profile: scheduled
+make reporter-stop-local
+```
+
+The scheduler checks hourly and sends daily/weekly/monthly/yearly reports at `REPORT_DAILY_HOUR` in `REPORT_SEND_TIMEZONE`.
+
+### API trigger
+
+```bash
+curl -X POST "http://localhost:8000/reports/generate?period=daily&send=true"
+```
+
 ## Database Schema
 
 | Table | Description |
@@ -1079,6 +1137,8 @@ This preserves energy totals while reducing granularity for older data:
 | `span_circuit_readings` | Per-circuit power and energy data |
 | `system_readings` | Host/container CPU, memory, and disk usage |
 | `fetch_run_summaries` | Fetcher run history (status, timing, per-integration stats) |
+| `report_summaries` | Per-site aggregated report metrics (JSONB) |
+| `report_deliveries` | Combined email delivery tracking |
 
 All time-series tables include `timestamp` and `location_id` for efficient Grafana queries. The `system_readings` table is an exception—it tracks the fetcher host, not a specific location.
 

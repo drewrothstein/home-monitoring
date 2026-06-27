@@ -475,6 +475,47 @@ api-logs-local:  ## [local] 📋 View API server logs
 api-stop-local:  ## [local] ⏹️  Stop API server
 	docker-compose stop api
 
+report-preview:  ## [local] 📧 Generate report preview (file mode) (usage: make report-preview PERIOD=daily [DATE=2026-06-26] [SITE=FL])
+	@if [ -z "$(PERIOD)" ]; then \
+		echo "❌ ERROR: PERIOD is required (daily, weekly, monthly, yearly)"; \
+		exit 1; \
+	fi
+	REPORT_EMAIL_MODE=file DATABASE_URL=$(DATABASE_URL) PYTHONPATH=. python -m home_monitor.report.cli preview \
+		--period $(PERIOD) $(if $(DATE),--date $(DATE),) $(if $(SITE),--site $(SITE),)
+
+report-preview-open:  ## [local] 📧 Generate report preview and open in browser
+	@if [ -z "$(PERIOD)" ]; then \
+		echo "❌ ERROR: PERIOD is required (daily, weekly, monthly, yearly)"; \
+		exit 1; \
+	fi
+	REPORT_EMAIL_MODE=file DATABASE_URL=$(DATABASE_URL) PYTHONPATH=. python -m home_monitor.report.cli preview \
+		--period $(PERIOD) $(if $(DATE),--date $(DATE),) $(if $(SITE),--site $(SITE),) --open
+
+report-send:  ## [local] 📧 Generate and send report (REPORT_EMAIL_MODE from .env: smtp or resend; usage: make report-send PERIOD=daily [DATE=2026-06-26])
+	@if [ -z "$(PERIOD)" ]; then \
+		echo "❌ ERROR: PERIOD is required (daily, weekly, monthly, yearly)"; \
+		exit 1; \
+	fi
+	DATABASE_URL=$(DATABASE_URL) PYTHONPATH=. python -m home_monitor.report.cli send \
+		--period $(PERIOD) $(if $(DATE),--date $(DATE),) $(if $(SITE),--site $(SITE),)
+
+report-generate:  ## [local] 📧 Aggregate report summaries only (usage: make report-generate PERIOD=daily [SITE=FL] [DATE=2026-06-26])
+	@if [ -z "$(PERIOD)" ]; then \
+		echo "❌ ERROR: PERIOD is required (daily, weekly, monthly, yearly)"; \
+		exit 1; \
+	fi
+	DATABASE_URL=$(DATABASE_URL) PYTHONPATH=. python -m home_monitor.report.cli generate \
+		--period $(PERIOD) $(if $(DATE),--date $(DATE),) $(if $(SITE),--site $(SITE),)
+
+reporter-start-local:  ## [local] ⏰ Start scheduled reporter
+	docker-compose --profile scheduled up -d reporter-scheduled
+
+reporter-stop-local:  ## [local] ⏹️  Stop scheduled reporter
+	docker-compose stop reporter-scheduled
+
+reporter-logs-local:  ## [local] 📋 View scheduled reporter logs
+	docker-compose logs -f reporter-scheduled
+
 # =============================================================================
 # Remote Commands
 # =============================================================================
@@ -609,10 +650,14 @@ deploy:  ## [remote] 🚀 Full deploy: sync files, rebuild, and restart everythi
 	@echo "🔨 Step 4: Rebuilding and restarting API..."
 	$(REMOTE_COMPOSE) up -d --build api"
 	@echo ""
+	@echo "🔨 Step 5: Rebuilding and restarting reporter..."
+	$(REMOTE_COMPOSE) --profile scheduled up -d --build reporter-scheduled"
+	@echo ""
 	@echo "✅ Deployment complete!"
 	@echo ""
 	@echo "View logs:"
 	@echo "  make fetcher-logs-remote   # Fetcher logs"
+	@echo "  make reporter-logs-remote  # Reporter logs"
 	@echo "  make api-logs-remote       # API logs"
 	@echo "  make infra-logs-remote     # All container logs"
 
@@ -729,6 +774,17 @@ fetcher-start-remote:  ## [remote] ⏰ Start scheduled fetcher
 fetcher-stop-remote:  ## [remote] ⏹️  Stop scheduled fetcher
 	@echo "⏹️  Stopping scheduled fetcher on $(DEPLOY_HOST)..."
 	ssh $(DEPLOY_HOST) "docker stop home-monitor-fetcher-scheduled || true"
+
+reporter-start-remote:  ## [remote] ⏰ Start scheduled reporter
+	@echo "⏰ Starting scheduled reporter on $(DEPLOY_HOST)..."
+	ssh $(DEPLOY_HOST) "cd $(DEPLOY_CONFIG_PATH) && docker compose -f docker-compose.prod.yml --profile scheduled up -d reporter-scheduled"
+
+reporter-stop-remote:  ## [remote] ⏹️  Stop scheduled reporter
+	@echo "⏹️  Stopping scheduled reporter on $(DEPLOY_HOST)..."
+	ssh $(DEPLOY_HOST) "docker stop home-monitor-reporter-scheduled || true"
+
+reporter-logs-remote:  ## [remote] 📋 View scheduled reporter logs
+	ssh $(DEPLOY_HOST) "docker logs -f home-monitor-reporter-scheduled"
 
 generate-dashboard-remote:  ## [remote] 📊 Generate and sync Grafana dashboard to remote
 	@PYTHONPATH=. python scripts/generate_dashboard.py

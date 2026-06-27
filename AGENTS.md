@@ -171,6 +171,33 @@ The project includes a FastAPI-based REST API for configuration queries and main
 | `/config/sites` | GET | Get site configuration from sites.json |
 | `/last` | GET | Get last fetcher run summary |
 | `/prune/span/circuits` | POST | Aggregate and prune old span circuit readings |
+| `/reports/generate` | POST | Generate and deliver email report |
+
+## Email Reports
+
+The report service aggregates per-site metrics into `report_summaries`, renders combined HTML email via MJML (Python composition, no Jinja), and delivers via file/console/SMTP/Resend (HTTP API).
+
+### Makefile targets
+
+- `make report-preview PERIOD=daily [DATE=YYYY-MM-DD] [SITE=name]` — write HTML to `reports/output/`
+- `make report-preview-open PERIOD=daily` — preview and open in browser
+- `make report-send PERIOD=daily` — send via SMTP
+- `make report-generate PERIOD=daily [SITE=name]` — aggregate summaries only (debug)
+- `make reporter-start-local` / `reporter-stop-local` — scheduled reporter (Docker profile `scheduled`)
+- `make reporter-start-remote` / `reporter-stop-remote` — remote scheduled reporter
+
+### Configuration
+
+See `env.example` for `REPORT_EMAIL_*`, `REPORT_SMTP_*`, and scheduling vars.
+
+### Architecture
+
+- `home_monitor/report/aggregator.py` — compute metrics, write `report_summaries`
+- `home_monitor/report/batch.py` — orchestrate all sites, trigger delivery
+- `home_monitor/report/mjml_builder.py` — compose MJML from Python functions
+- `home_monitor/report/charts.py` — matplotlib PNG charts for weekly+ reports
+- `home_monitor/report/email.py` — file/console/SMTP/Resend delivery (Resend uses the HTTP API with charts attached inline via `content_id`)
+- `home_monitor/report/scheduler.py` — hourly check for due reports
 
 ### Adding New API Endpoints
 
@@ -198,6 +225,7 @@ Remote deployment operations use these Makefile targets:
 - `make deploy-sync-remote` - Sync config files to remote
 - `make infra-up-remote` - Start postgres and grafana only
 - `make fetcher-start-remote` - Start the scheduled fetcher
+- `make reporter-start-remote` - Start the scheduled reporter
 - `make db-migrate-to-remote` - Migrate local database to remote
 - `make infra-logs-remote` - View logs from remote containers
 

@@ -114,6 +114,24 @@ services:
       fi"
     restart: unless-stopped
 
+  reporter-scheduled:
+    profiles:
+      - scheduled
+    build: .
+    container_name: home-monitor-reporter-scheduled
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://home_monitor:home_monitor_password@postgres:5432/home_monitor
+      REPORT_CHECK_INTERVAL_MINUTES: 60
+    volumes:
+      - ./sites.json:/app/sites.json:ro
+    command: python -m home_monitor.report.scheduler
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   grafana_data:
