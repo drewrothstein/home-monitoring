@@ -191,6 +191,50 @@ def generate_hourly_power_chart(
     return _fig_to_png(fig)
 
 
+def generate_pool_temp_air_chart(
+    temp_profile: List[Dict[str, Any]],
+    site_name: str,
+) -> bytes:
+    """Line chart comparing pool temperature to air temperature through the day."""
+    points = [
+        p
+        for p in temp_profile
+        if p.get("pool_temp_f") is not None or p.get("air_temp_f") is not None
+    ]
+    if not points:
+        return _empty_chart(site_name, "No pool temperature data")
+
+    hours = [p["hour_label"] for p in temp_profile]
+    pool_temp = [p.get("pool_temp_f") for p in temp_profile]
+    air_temp = [p.get("air_temp_f") for p in temp_profile]
+
+    fig, ax = plt.subplots(figsize=(7.5, 3.4))
+    x = range(len(hours))
+
+    ax.plot(x, pool_temp, color=COLORS["consumption"], label="_nolegend_", zorder=3)
+    ax.plot(
+        x,
+        air_temp,
+        color=COLORS["import"],
+        label="_nolegend_",
+        zorder=3,
+        linestyle="--",
+    )
+
+    ax.set_ylabel("°F", fontweight="500")
+    ax.set_title(f"{site_name} — Pool vs Air Temperature", pad=12)
+    step = 2
+    tick_x = list(x)[::step]
+    ax.set_xticks(tick_x)
+    ax.set_xticklabels([hours[i] for i in tick_x], rotation=0, fontsize=8)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:.0f}"))
+    ax.grid(axis="y", alpha=0.9, zorder=0)
+    ax.set_xlim(-0.5, len(hours) - 0.5)
+
+    fig.tight_layout()
+    return _fig_to_png(fig)
+
+
 def generate_site_charts(
     site_name: str,
     metrics: Dict[str, Any],
@@ -211,6 +255,19 @@ def generate_site_charts(
             cid = f"chart-{site_key}-hourly"
             charts[cid] = generate_hourly_power_chart(hourly, site_name)
             legends[cid] = prod_cons_legend
+
+        pool = metrics.get("pool") or {}
+        temp_profile = pool.get("temp_profile")
+        if temp_profile and any(
+            p.get("pool_temp_f") is not None or p.get("air_temp_f") is not None
+            for p in temp_profile
+        ):
+            cid = f"chart-{site_key}-pooltemp"
+            charts[cid] = generate_pool_temp_air_chart(temp_profile, site_name)
+            legends[cid] = [
+                ("Pool", COLORS["consumption"]),
+                ("Air", COLORS["import"]),
+            ]
         return charts, legends
 
     breakdown = metrics.get("daily_breakdown")

@@ -83,38 +83,144 @@ def fetch_power_peaks(
     }
 
 
+def fetch_trailing_daily_averages(
+    location_id: int,
+    start_utc: datetime,
+    end_utc: datetime,
+    tz_name: str,
+) -> Dict[str, float]:
+    """Average per-day energy totals across the trailing window (days with data only)."""
+    breakdown = fetch_daily_breakdown(location_id, start_utc, end_utc, tz_name)
+    keys = ("production_kwh", "consumption_kwh", "import_kwh", "export_kwh")
+    totals = {k: 0.0 for k in keys}
+    days_with_data = 0
+    for day in breakdown:
+        has_data = (day.get("production_kwh") or 0) > 0 or (day.get("consumption_kwh") or 0) > 0
+        if not has_data:
+            continue
+        days_with_data += 1
+        for k in keys:
+            totals[k] += day.get(k) or 0.0
+
+    if days_with_data == 0:
+        return {f"avg_{k}": 0.0 for k in keys} | {"days": 0}
+
+    averages = {f"avg_{k}": totals[k] / days_with_data for k in keys}
+    averages["days"] = days_with_data
+    return averages
+
+
 def fetch_battery_metrics(
     location_id: int,
     start_utc: datetime,
     end_utc: datetime,
 ) -> Optional[Dict[str, float]]:
+    """
+    Aggregate battery state of charge across all Powerwalls / Tesla energy sites.
+
+    Each Tesla ``energy_site`` reports a single aggregate state of charge (only the
+    index-0 bank receives readings), and a location can have multiple energy sites
+    (e.g. FL) whose readings are not timestamp-aligned. We therefore:
+
+    1. Compute each energy site's nameplate capacity (sum of its banks' capacity).
+    2. Bucket readings into 15-minute bins and average each site's SOC per bin.
+    3. Combine sites within a bin as a capacity-weighted SOC, only using bins where
+       every site reported, so the combined series is consistent over time.
+
+    Stored energy is derived from ``SOC x nameplate capacity`` because the Tesla
+    live-status payload does not include absolute stored energy (``energy_charged``
+    / ``energy_discharged`` are not populated). When capacities are unknown the
+    weighting collapses to a simple average and stored-energy figures are omitted.
+    """
     sql = """
+    WITH site_caps AS (
+      SELECT energy_site_id, SUM(capacity_kwh) AS cap
+      FROM battery_banks
+      WHERE location_id = %(location_id)s
+      GROUP BY energy_site_id
+    ),
+    weights AS (
+      SELECT energy_site_id,
+             cap,
+             COALESCE(NULLIF(cap, 0), 1.0) AS weight
+      FROM site_caps
+    ),
+    n_sites AS (SELECT COUNT(*) AS n FROM weights),
+    binned AS (
+      SELECT bb.energy_site_id,
+             date_bin('15 minutes', br.timestamp, TIMESTAMP '2000-01-01') AS bucket,
+             AVG(br.state_of_charge) AS soc
+      FROM battery_readings br
+      JOIN battery_banks bb ON bb.id = br.battery_bank_id
+      WHERE br.location_id = %(location_id)s
+        AND br.timestamp >= %(start_utc)s
+        AND br.timestamp < %(end_utc)s
+        AND br.state_of_charge IS NOT NULL
+      GROUP BY bb.energy_site_id, bucket
+    ),
+    combined AS (
+      SELECT b.bucket,
+             SUM(b.soc / 100.0 * w.weight) AS stored,
+             SUM(w.weight) AS weight,
+             SUM(b.soc / 100.0 * w.cap) AS stored_kwh,
+             COUNT(DISTINCT b.energy_site_id) AS sites_present
+      FROM binned b
+      JOIN weights w ON w.energy_site_id = b.energy_site_id
+      GROUP BY b.bucket
+    ),
+    aligned AS (
+      SELECT * FROM combined WHERE sites_present = (SELECT n FROM n_sites)
+    )
     SELECT
-      (SELECT state_of_charge FROM battery_readings
-       WHERE location_id = %(location_id)s
-         AND timestamp >= %(start_utc)s AND timestamp < %(end_utc)s
-         AND state_of_charge IS NOT NULL
-       ORDER BY timestamp DESC LIMIT 1) AS end_soc,
-      MIN(state_of_charge) FILTER (WHERE state_of_charge IS NOT NULL) AS min_soc,
-      MAX(state_of_charge) FILTER (WHERE state_of_charge IS NOT NULL) AS max_soc,
-      COALESCE(SUM(COALESCE(energy_charged, 0)), 0) AS charge_kwh,
-      COALESCE(SUM(COALESCE(energy_discharged, 0)), 0) AS discharge_kwh
-    FROM battery_readings
-    WHERE location_id = %(location_id)s
-      AND timestamp >= %(start_utc)s
-      AND timestamp < %(end_utc)s
+      (SELECT stored / weight * 100 FROM aligned ORDER BY bucket DESC LIMIT 1) AS end_soc,
+      (SELECT stored / weight * 100 FROM aligned ORDER BY bucket ASC LIMIT 1) AS start_soc,
+      MIN(stored / weight * 100) AS min_soc,
+      MAX(stored / weight * 100) AS max_soc,
+      (SELECT stored_kwh FROM aligned ORDER BY bucket DESC LIMIT 1)
+        - (SELECT stored_kwh FROM aligned ORDER BY bucket ASC LIMIT 1) AS net_stored_kwh,
+      (SELECT SUM(cap) FROM site_caps) AS total_capacity_kwh
+    FROM aligned
     """
     params = {"location_id": location_id, "start_utc": start_utc, "end_utc": end_utc}
     rows = _fetch_rows(sql, params)
     if not rows or rows[0]["end_soc"] is None:
         return None
+
     row = rows[0]
+    end_soc = float(row["end_soc"])
+    total_capacity = row["total_capacity_kwh"]
+    has_capacity = total_capacity is not None and float(total_capacity) > 0
+
+    # Per-site end SOC so the combined card can show a breakdown (e.g. "83% / 20%")
+    # when a location spans multiple Tesla energy sites (e.g. FL). Ordered by
+    # energy_site_id for stable left-to-right ordering across reports.
+    site_sql = """
+    SELECT DISTINCT ON (bb.energy_site_id)
+      bb.energy_site_id,
+      br.state_of_charge AS end_soc
+    FROM battery_readings br
+    JOIN battery_banks bb ON bb.id = br.battery_bank_id
+    WHERE br.location_id = %(location_id)s
+      AND br.timestamp >= %(start_utc)s
+      AND br.timestamp < %(end_utc)s
+      AND br.state_of_charge IS NOT NULL
+    ORDER BY bb.energy_site_id, br.timestamp DESC
+    """
+    site_rows = _fetch_rows(site_sql, params)
+    site_socs = [float(r["end_soc"]) for r in site_rows if r["end_soc"] is not None]
+
     return {
-        "end_soc_pct": float(row["end_soc"]),
-        "min_soc_pct": float(row["min_soc"] or row["end_soc"]),
-        "max_soc_pct": float(row["max_soc"] or row["end_soc"]),
-        "charge_kwh": float(row["charge_kwh"]),
-        "discharge_kwh": float(row["discharge_kwh"]),
+        "end_soc_pct": end_soc,
+        "start_soc_pct": float(row["start_soc"]) if row["start_soc"] is not None else end_soc,
+        "min_soc_pct": float(row["min_soc"]) if row["min_soc"] is not None else end_soc,
+        "max_soc_pct": float(row["max_soc"]) if row["max_soc"] is not None else end_soc,
+        "net_stored_kwh": (
+            float(row["net_stored_kwh"])
+            if has_capacity and row["net_stored_kwh"] is not None
+            else None
+        ),
+        "total_capacity_kwh": float(total_capacity) if has_capacity else None,
+        "site_socs": site_socs,
     }
 
 
@@ -295,6 +401,7 @@ def fetch_pool_metrics(
     SELECT
       AVG(pool_temp) FILTER (WHERE pool_temp IS NOT NULL) AS avg_pool_temp_f,
       AVG(spa_temp) FILTER (WHERE spa_temp IS NOT NULL) AS avg_spa_temp_f,
+      AVG(air_temp) FILTER (WHERE air_temp IS NOT NULL) AS avg_air_temp_f,
       COUNT(*) FILTER (WHERE pool_pump) AS pump_samples_on,
       COUNT(*) FILTER (WHERE pool_heater) AS heater_samples_on,
       COUNT(*) AS total_samples
@@ -312,9 +419,94 @@ def fetch_pool_metrics(
     return {
         "avg_pool_temp_f": float(row["avg_pool_temp_f"]) if row["avg_pool_temp_f"] else None,
         "avg_spa_temp_f": float(row["avg_spa_temp_f"]) if row["avg_spa_temp_f"] else None,
+        "avg_air_temp_f": float(row["avg_air_temp_f"]) if row["avg_air_temp_f"] else None,
         "pump_hours": round(int(row["pump_samples_on"] or 0) * interval_minutes / 60.0, 1),
         "heater_hours": round(int(row["heater_samples_on"] or 0) * interval_minutes / 60.0, 1),
     }
+
+
+def fetch_pool_temp_air_profile(
+    location_id: int,
+    start_utc: datetime,
+    end_utc: datetime,
+    tz_name: str,
+) -> List[Dict[str, Any]]:
+    """Average pool and air temperature by hour-of-day (local tz) for daily pool charts."""
+    sql = """
+    SELECT
+      EXTRACT(HOUR FROM timestamp AT TIME ZONE %(tz)s)::int AS hour,
+      AVG(pool_temp) FILTER (WHERE pool_temp IS NOT NULL) AS pool_temp_f,
+      AVG(air_temp) FILTER (WHERE air_temp IS NOT NULL) AS air_temp_f
+    FROM pool_readings
+    WHERE location_id = %(location_id)s
+      AND timestamp >= %(start_utc)s
+      AND timestamp < %(end_utc)s
+    GROUP BY EXTRACT(HOUR FROM timestamp AT TIME ZONE %(tz)s)
+    ORDER BY hour
+    """
+    params = {
+        "location_id": location_id,
+        "start_utc": start_utc,
+        "end_utc": end_utc,
+        "tz": tz_name,
+    }
+    rows = _fetch_rows(sql, params)
+    if not rows:
+        return []
+
+    by_hour = {int(r["hour"]): r for r in rows}
+
+    def hour_label(h: int) -> str:
+        if h == 0:
+            return "12a"
+        if h < 12:
+            return f"{h}a"
+        if h == 12:
+            return "12p"
+        return f"{h - 12}p"
+
+    profile = []
+    for hour in range(24):
+        row = by_hour.get(hour)
+        profile.append(
+            {
+                "hour": hour,
+                "hour_label": hour_label(hour),
+                "pool_temp_f": float(row["pool_temp_f"]) if row and row["pool_temp_f"] else None,
+                "air_temp_f": float(row["air_temp_f"]) if row and row["air_temp_f"] else None,
+            }
+        )
+    return profile
+
+
+def fetch_propane_usage_gallons(
+    location_id: int,
+    start_utc: datetime,
+    end_utc: datetime,
+) -> Optional[float]:
+    """Gallons of propane consumed in a window (tank-level drop). None if no data.
+
+    Returns 0.0 when the tank level rose (a refill) so refills do not read as usage.
+    """
+    sql = """
+    SELECT
+      (SELECT tank_level_gallons FROM propane_readings
+       WHERE location_id = %(location_id)s
+         AND timestamp >= %(start_utc)s AND timestamp < %(end_utc)s
+         AND tank_level_gallons IS NOT NULL
+       ORDER BY timestamp ASC LIMIT 1) AS start_gallons,
+      (SELECT tank_level_gallons FROM propane_readings
+       WHERE location_id = %(location_id)s
+         AND timestamp >= %(start_utc)s AND timestamp < %(end_utc)s
+         AND tank_level_gallons IS NOT NULL
+       ORDER BY timestamp DESC LIMIT 1) AS end_gallons
+    """
+    params = {"location_id": location_id, "start_utc": start_utc, "end_utc": end_utc}
+    rows = _fetch_rows(sql, params)
+    if not rows or rows[0]["start_gallons"] is None or rows[0]["end_gallons"] is None:
+        return None
+    used = float(rows[0]["start_gallons"]) - float(rows[0]["end_gallons"])
+    return max(used, 0.0)
 
 
 def fetch_span_top_circuits(

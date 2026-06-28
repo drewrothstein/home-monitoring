@@ -37,19 +37,74 @@ def _sample_batch() -> ReportBatch:
                 "max_production_kw": 8.5,
                 "max_consumption_kw": 6.2,
             },
+            "baseline_7d": {
+                "avg_production_kwh": 40.0,
+                "avg_consumption_kwh": 35.0,
+                "avg_import_kwh": 4.0,
+                "avg_export_kwh": 10.0,
+                "days": 7,
+            },
+            "hero_card": {
+                "emoji": "✅",
+                "label": "Solar vs Usage",
+                "value": "112%",
+                "tone": "good",
+                "trend": None,
+                "trend_tone": "neutral",
+            },
+            "cards": [
+                {
+                    "emoji": "☀️",
+                    "label": "Produced",
+                    "value": "42.5 kWh",
+                    "tone": "neutral",
+                    "trend": "▲ 6% vs avg",
+                    "trend_tone": "good",
+                },
+                {
+                    "emoji": "🏠",
+                    "label": "Used",
+                    "value": "38.0 kWh",
+                    "tone": "neutral",
+                    "trend": "▲ 9% vs avg",
+                    "trend_tone": "bad",
+                },
+                {
+                    "emoji": "🔌",
+                    "label": "Exported",
+                    "value": "6.9 kWh",
+                    "tone": "good",
+                    "trend": None,
+                    "trend_tone": "neutral",
+                },
+                {
+                    "emoji": "🔋",
+                    "label": "Battery",
+                    "value": "78%",
+                    "tone": "neutral",
+                    "trend": "▲ 2.0 kWh",
+                    "trend_tone": "good",
+                },
+                {
+                    "emoji": "💧",
+                    "label": "Water",
+                    "value": "250 gal",
+                    "tone": "neutral",
+                    "trend": "▲ 67% vs avg",
+                    "trend_tone": "bad",
+                },
+            ],
             "hourly_profile": [
                 {"hour": h, "hour_label": "12p", "production_kw": 3.0, "consumption_kw": 2.0}
                 for h in range(24)
             ],
             "battery": {
                 "end_soc_pct": 78,
+                "start_soc_pct": 76,
                 "min_soc_pct": 45,
                 "max_soc_pct": 92,
-            },
-            "water": {
-                "total_gallons": 180,
-                "avg_daily_gallons": 180,
-                "sprinkler_days": 2,
+                "net_stored_kwh": 2.0,
+                "total_capacity_kwh": 40.5,
             },
         },
     )
@@ -81,7 +136,13 @@ def test_build_combined_report_mjml_structure():
     assert "<mjml>" in mjml
     assert "FL" in mjml
     assert "Daily Report" in mjml
-    assert "Water" in mjml or "180" in mjml
+    # Card-first layout: hero coverage card, metric cards, and conditional water card.
+    assert "112%" in mjml  # hero coverage value
+    assert "42.5 kWh" in mjml and "Produced" in mjml
+    assert "Water" in mjml and "250 gal" in mjml
+    # Cards stack on mobile (no mj-group), and top-circuits is gone.
+    assert "mj-group" not in mjml
+    assert "Top Circuits" not in mjml
 
 
 def test_render_report_produces_html():

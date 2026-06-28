@@ -132,6 +132,25 @@ def period_bounds_for_date(
     )
 
 
+def trailing_window(period: PeriodBounds, days: int) -> Tuple[datetime, datetime]:
+    """
+    UTC window covering the ``days`` calendar days immediately before ``period``.
+
+    Computed from local calendar dates (not raw UTC subtraction) so it stays aligned
+    to local midnight across DST changes. Returns ``(start_utc, period.start)``.
+    """
+    tz = ZoneInfo(period.timezone)
+    end_local_date = period.start.astimezone(tz).date()
+    start_local_date = end_local_date - timedelta(days=days)
+    start = _local_midnight_to_utc(start_local_date, period.timezone)
+    return start, period.start
+
+
+def previous_day_window(period: PeriodBounds) -> Tuple[datetime, datetime]:
+    """UTC window for the single day immediately before ``period``."""
+    return trailing_window(period, 1)
+
+
 def batch_period_bounds(
     period_type: PeriodType,
     tz_name: str,
