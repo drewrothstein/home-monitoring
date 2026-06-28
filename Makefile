@@ -23,6 +23,15 @@ REMOTE_COMPOSE = ssh $(DEPLOY_HOST) "cd $(DEPLOY_CONFIG_PATH) && docker compose 
 DEPLOY_CONTEXT ?= home-monitor-pi
 DEPLOY_COMPOSE := -p home-monitor -f docker-compose.prod.yml
 
+# Database clone configuration
+# Tables whose row data is skipped when cloning the DB (e.g. remote -> local). The
+# table schema is still created (via --exclude-table-data), so the dashboard and
+# init_database stay consistent; only the bulk rows are omitted. span_circuit_readings
+# is ~1.5 GB of per-circuit data that the reports no longer use. Space-separated.
+DB_CLONE_EXCLUDE_TABLE_DATA ?= span_circuit_readings
+DB_CLONE_EXCLUDE_ARGS := $(foreach t,$(DB_CLONE_EXCLUDE_TABLE_DATA),--exclude-table-data=$(t))
+REMOTE_DUMP_FILE := /tmp/home_monitor_remote_dump.sql
+
 # =============================================================================
 # Help
 # =============================================================================
@@ -57,6 +66,16 @@ db-dump:  ## [local] 💾 Dump database to /tmp/home_monitor_dump.sql
 	@echo "💾 Dumping local database..."
 	docker exec home-monitor-db pg_dump -U home_monitor -d home_monitor --no-owner --no-acl > /tmp/home_monitor_dump.sql
 	@echo "✅ Dump complete: $$(wc -l < /tmp/home_monitor_dump.sql) lines, $$(du -h /tmp/home_monitor_dump.sql | cut -f1)"
+
+db-restore-local:  ## [local] 📥 Restore /tmp/home_monitor_remote_dump.sql into the local database (run db-dump-remote first)
+	@if [ ! -f $(REMOTE_DUMP_FILE) ]; then \
+		echo "❌ ERROR: $(REMOTE_DUMP_FILE) not found"; \
+		echo "Run 'make db-dump-remote' first to create the dump file"; \
+		exit 1; \
+	fi
+	@echo "📥 Restoring dump into local database..."
+	@cat $(REMOTE_DUMP_FILE) | docker exec -i home-monitor-db psql -U home_monitor -d home_monitor
+	@echo "✅ Local database restore complete"
 
 deps:  ## [local] 📦 Install Python dependencies
 	pip install -r requirements.txt
@@ -550,6 +569,19 @@ db-restore-remote:  ## [remote] 📥 Restore database dump to remote host (run d
 	ssh $(DEPLOY_HOST) "cat /tmp/home_monitor_dump.sql | docker exec -i home-monitor-db psql -U home_monitor -d home_monitor"
 	@echo ""
 	@echo "✅ Database restore complete"
+
+db-dump-remote:  ## [remote] 💾 Dump remote database to /tmp/home_monitor_remote_dump.sql (skips per-circuit data)
+	@echo "💾 Dumping remote database from $(DEPLOY_HOST) (excluding: $(DB_CLONE_EXCLUDE_TABLE_DATA))..."
+	ssh $(DEPLOY_HOST) "docker exec home-monitor-db pg_dump -U home_monitor -d home_monitor --no-owner --no-acl $(DB_CLONE_EXCLUDE_ARGS)" > $(REMOTE_DUMP_FILE)
+	@echo "✅ Dump complete: $$(wc -l < $(REMOTE_DUMP_FILE)) lines, $$(du -h $(REMOTE_DUMP_FILE) | cut -f1)"
+
+db-sync-from-remote:  ## [remote] 🔄 Clone remote database to local (dump + drop local + restore, skips per-circuit data)
+	@echo "🔄 Syncing database from $(DEPLOY_HOST) to local..."
+	$(MAKE) db-dump-remote
+	$(MAKE) drop-db-local
+	$(MAKE) db-restore-local
+	@echo ""
+	@echo "✅ Local database is now a clone of remote (per-circuit data excluded)"
 
 deploy-build-remote:  ## [remote] 🔨 Build images on remote host without starting containers
 	@echo "Building on $(DEPLOY_HOST)..."

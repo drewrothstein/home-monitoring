@@ -32,23 +32,107 @@ def _fmt_num(value: Optional[float], decimals: int = 1, suffix: str = "") -> str
     return f"{value:.{decimals}f}{suffix}"
 
 
-def hero_stats_mjml(power: Dict[str, Any]) -> str:
-    """Four stat cards in a row."""
-    columns = []
-    for label, key, unit, color, bg in STAT_CARDS:
-        value = _fmt_num(power.get(key), suffix=f" {unit}")
-        columns.append(
-            f"""
-    <mj-column width="25%" background-color="{bg}" padding="14px 8px">
+TONE_COLORS = {"good": COLORS["production"], "bad": "#dc2626"}
+
+
+def _tone_color(tone: Optional[str]) -> str:
+    return TONE_COLORS.get(tone or "", COLORS["text"])
+
+
+def _stat_card_column(label: str, value: str, color: str, bg: str) -> str:
+    return f"""
+    <mj-column background-color="{bg}" padding="12px 8px" border-radius="6px">
       <mj-text align="center" font-size="11px" font-weight="600"
         color="{COLORS['muted']}" letter-spacing="0.5px"
-        text-transform="uppercase" padding-bottom="6px">{_esc(label)}</mj-text>
-      <mj-text align="center" font-size="24px" font-weight="700"
+        text-transform="uppercase" padding-bottom="4px">{_esc(label)}</mj-text>
+      <mj-text align="center" font-size="20px" font-weight="700"
         color="{color}" line-height="1.2" padding-top="0">{_esc(value)}</mj-text>
     </mj-column>
-            """
+    """
+
+
+def hero_stats_mjml(power: Dict[str, Any]) -> str:
+    """Secondary raw-number stat cards laid out 2x2.
+
+    Uses two sections of two plain columns rather than an ``mj-group`` so the cards
+    stack to full width on mobile instead of staying squished side-by-side.
+    """
+    cards = [
+        (label, _fmt_num(power.get(key), suffix=f" {unit}"), color, bg)
+        for label, key, unit, color, bg in STAT_CARDS
+    ]
+
+    def row(pair: List[tuple]) -> str:
+        cols = "".join(_stat_card_column(*card) for card in pair)
+        return f'<mj-section background-color="#ffffff" padding="4px 14px">{cols}</mj-section>'
+
+    return row(cards[:2]) + row(cards[2:])
+
+
+HERO_BG = {"good": "#f0fdf4", "bad": "#fef2f2"}
+
+
+def hero_card_mjml(card: Optional[Dict[str, Optional[str]]]) -> str:
+    """Full-width headline card (e.g. did solar cover usage?) with a big emoji + value."""
+    if not card:
+        return ""
+    color = _tone_color(card.get("tone"))
+    bg = HERO_BG.get(card.get("tone") or "", COLORS["background"])
+    return f"""
+    <mj-section background-color="#ffffff" padding="8px 14px 4px 14px">
+      <mj-column background-color="{bg}" border-radius="12px" padding="18px 12px">
+        <mj-text align="center" font-size="40px" line-height="1" padding-bottom="2px">{_esc(card.get("emoji", ""))}</mj-text>
+        <mj-text align="center" font-size="34px" font-weight="800" color="{color}" line-height="1.1">{_esc(card.get("value", ""))}</mj-text>
+        <mj-text align="center" font-size="12px" font-weight="700" color="{COLORS['muted']}"
+          letter-spacing="0.6px" text-transform="uppercase" padding-top="4px">{_esc(card.get("label", ""))}</mj-text>
+      </mj-column>
+    </mj-section>
+    """
+
+
+def _card_column_mjml(card: Dict[str, Optional[str]]) -> str:
+    value_color = _tone_color(card.get("tone"))
+    trend = card.get("trend")
+    trend_html = (
+        f'<mj-text align="center" font-size="12px" font-weight="600" '
+        f'color="{_tone_color(card.get("trend_tone"))}" '
+        f'padding-top="3px">{_esc(trend)}</mj-text>'
+        if trend
+        else ""
+    )
+    detail = card.get("detail")
+    detail_html = (
+        f'<mj-text align="center" font-size="11px" color="{COLORS["muted"]}" '
+        f'padding-top="2px">{_esc(detail)}</mj-text>'
+        if detail
+        else ""
+    )
+    return f"""
+    <mj-column background-color="{COLORS['background']}" border-radius="10px" padding="14px 8px">
+      <mj-text align="center" font-size="26px" line-height="1" padding-bottom="4px">{_esc(card.get("emoji", ""))}</mj-text>
+      <mj-text align="center" font-size="21px" font-weight="700" color="{value_color}"
+        line-height="1.15">{_esc(card.get("value", ""))}</mj-text>
+      <mj-text align="center" font-size="11px" font-weight="600" color="{COLORS['muted']}"
+        letter-spacing="0.4px" text-transform="uppercase" padding-top="3px">{_esc(card.get("label", ""))}</mj-text>
+      {trend_html}
+      {detail_html}
+    </mj-column>
+    """
+
+
+def cards_grid_mjml(cards: List[Dict[str, Optional[str]]]) -> str:
+    """Responsive 2-up grid of stat cards (stacks to full width on mobile)."""
+    cards = [c for c in cards if c]
+    if not cards:
+        return ""
+    rows = []
+    for i in range(0, len(cards), 2):
+        pair = cards[i : i + 2]
+        cols = "".join(_card_column_mjml(c) for c in pair)
+        rows.append(
+            f'<mj-section background-color="#ffffff" padding="6px 14px">{cols}</mj-section>'
         )
-    return f'<mj-group width="100%">{"".join(columns)}</mj-group>'
+    return "".join(rows)
 
 
 def chart_legend_mjml(items: List[Tuple[str, str]]) -> str:
@@ -112,29 +196,39 @@ def _detail_line(text: str) -> str:
     """
 
 
-def site_section_mjml(
-    summary: SiteReportSummary,
-    chart_images: Dict[str, str],
-    chart_legends: Dict[str, List[Tuple[str, str]]],
-    period_type: str,
-    embed_base64: bool = False,
+def _chart_section_mjml(
+    cid: str,
+    title: str,
+    alt: str,
+    legend_html: str,
+    embed_value: Optional[str],
 ) -> str:
-    """Build MJML section for one site."""
-    metrics = summary.metrics
-    if summary.status == "failed":
-        return f"""
-        <mj-section background-color="#fef2f2" padding="20px">
-          <mj-column>
-            <mj-text font-size="20px" font-weight="700" color="#dc2626">{_esc(summary.location_name)}</mj-text>
-            <mj-text color="#dc2626" font-size="14px">Failed to compute metrics: {_esc(summary.error_message)}</mj-text>
-          </mj-column>
-        </mj-section>
-        """
+    return f"""
+    <mj-section background-color="#ffffff" padding="12px 20px">
+      <mj-column background-color="{COLORS['background']}" border-radius="8px" padding="16px">
+        <mj-text font-size="15px" font-weight="600" color="{COLORS['text']}" padding-bottom="8px">
+          {_esc(title)}
+        </mj-text>
+        {chart_image_mjml(cid, alt, embed_value)}
+        {legend_html}
+      </mj-column>
+    </mj-section>
+    """
 
-    parts: List[str] = []
-    parts.append(
-        f"""
-    <mj-section background-color="#ffffff" padding="24px 20px 8px 20px">
+
+def _divider_mjml() -> str:
+    return """
+    <mj-section padding="0 20px">
+      <mj-column>
+        <mj-divider border-color="#e2e8f0" border-width="1px" />
+      </mj-column>
+    </mj-section>
+    """
+
+
+def _site_header_mjml(summary: SiteReportSummary, metrics: Dict[str, Any]) -> str:
+    return f"""
+    <mj-section background-color="#ffffff" padding="24px 20px 4px 20px">
       <mj-column>
         <mj-text font-size="22px" font-weight="700" color="{COLORS['text']}" padding-bottom="4px">
           {_esc(summary.location_name)}
@@ -145,64 +239,47 @@ def site_section_mjml(
       </mj-column>
     </mj-section>
     """
+
+
+def _peaks_line_mjml(power: Dict[str, Any]) -> str:
+    peak_text = (
+        f"Peak production {_fmt_num(power.get('max_production_kw'), suffix=' kW')} · "
+        f"Peak consumption {_fmt_num(power.get('max_consumption_kw'), suffix=' kW')}"
     )
+    return f"""
+    <mj-section background-color="#ffffff" padding="0 20px 8px 20px">
+      <mj-column>
+        <mj-text font-size="13px" color="{COLORS['muted']}" align="center">{_esc(peak_text)}</mj-text>
+      </mj-column>
+    </mj-section>
+    """
 
-    power = metrics.get("power", {})
-    if power:
-        parts.append(
-            f"""
-        <mj-section background-color="#ffffff" padding="8px 12px">
-          {hero_stats_mjml(power)}
-        </mj-section>
-        """
-        )
-        peak_text = (
-            f"Peak production {_fmt_num(power.get('max_production_kw'), suffix=' kW')} · "
-            f"Peak consumption {_fmt_num(power.get('max_consumption_kw'), suffix=' kW')}"
-        )
-        parts.append(
-            f"""
-        <mj-section background-color="#ffffff" padding="0 20px 8px 20px">
-          <mj-column>
-            <mj-text font-size="13px" color="{COLORS['muted']}" align="center">{_esc(peak_text)}</mj-text>
-          </mj-column>
-        </mj-section>
-        """
-        )
 
-    site_key = summary.location_name.lower()
-    for cid, b64 in chart_images.items():
-        if not cid.startswith(f"chart-{site_key}"):
-            continue
-        if "hourly" in cid:
-            chart_title = "Power Through the Day"
-        else:
-            chart_title = "Monthly Energy" if period_type == "yearly" else "Daily Energy"
+def _failed_section_mjml(summary: SiteReportSummary) -> str:
+    return f"""
+    <mj-section background-color="#fef2f2" padding="20px">
+      <mj-column>
+        <mj-text font-size="20px" font-weight="700" color="#dc2626">{_esc(summary.location_name)}</mj-text>
+        <mj-text color="#dc2626" font-size="14px">Failed to compute metrics: {_esc(summary.error_message)}</mj-text>
+      </mj-column>
+    </mj-section>
+    """
 
-        legend_html = chart_legend_mjml(chart_legends.get(cid, []))
-        parts.append(
-            f"""
-        <mj-section background-color="#ffffff" padding="12px 20px">
-          <mj-column background-color="{COLORS['background']}" border-radius="8px" padding="16px">
-            <mj-text font-size="15px" font-weight="600" color="{COLORS['text']}" padding-bottom="8px">
-              {chart_title}
-            </mj-text>
-            {chart_image_mjml(cid, f"{summary.location_name} {chart_title}", b64 if embed_base64 else None)}
-            {legend_html}
-          </mj-column>
-        </mj-section>
-            """
-        )
 
+def _legacy_detail_lines(metrics: Dict[str, Any]) -> List[str]:
+    """Simple detail lines retained for weekly/monthly/yearly reports."""
     detail_lines: List[str] = []
     battery = metrics.get("battery")
     if battery:
         pct = "%"
-        detail_lines.append(
+        line = (
             f"Battery {_fmt_num(battery.get('end_soc_pct'), decimals=0, suffix=pct)} "
             f"(low {_fmt_num(battery.get('min_soc_pct'), decimals=0, suffix=pct)}, "
             f"high {_fmt_num(battery.get('max_soc_pct'), decimals=0, suffix=pct)})"
         )
+        if battery.get("net_stored_kwh") is not None:
+            line += f" · net {_fmt_num(battery.get('net_stored_kwh'), suffix=' kWh')}"
+        detail_lines.append(line)
 
     water = metrics.get("water")
     if water:
@@ -238,45 +315,71 @@ def site_section_mjml(
         detail_lines.append(
             f"Avg solar irradiance {_fmt_num(tempest.get('avg_ghi'), suffix=' W/m²')}"
         )
+    return detail_lines
 
-    if detail_lines:
-        detail_content = "".join(_detail_line(line) for line in detail_lines)
+
+def site_section_mjml(
+    summary: SiteReportSummary,
+    chart_images: Dict[str, str],
+    chart_legends: Dict[str, List[Tuple[str, str]]],
+    period_type: str,
+    embed_base64: bool = False,
+) -> str:
+    """Build MJML section for one site."""
+    metrics = summary.metrics
+    if summary.status == "failed":
+        return _failed_section_mjml(summary)
+
+    site_key = summary.location_name.lower()
+    power = metrics.get("power", {})
+    parts: List[str] = [_site_header_mjml(summary, metrics)]
+
+    if period_type == "daily":
+        # Lead with the visual cards; raw numbers and charts come after.
+        parts.append(hero_card_mjml(metrics.get("hero_card")))
+        parts.append(cards_grid_mjml(metrics.get("cards", [])))
+        if power:
+            parts.append(_peaks_line_mjml(power))
+    else:
+        if power:
+            parts.append(hero_stats_mjml(power))
+            parts.append(_peaks_line_mjml(power))
+
+    # Charts: hourly power + pool-vs-air for daily; period energy bars otherwise.
+    for cid in chart_images:
+        if not cid.startswith(f"chart-{site_key}"):
+            continue
+        if "pooltemp" in cid:
+            chart_title = "Pool vs Air Temperature"
+        elif "hourly" in cid:
+            chart_title = "Power Through the Day"
+        else:
+            chart_title = "Monthly Energy" if period_type == "yearly" else "Daily Energy"
         parts.append(
-            f"""
-        <mj-section background-color="#ffffff" padding="0 20px 12px 20px">
-          <mj-column background-color="#f1f5f9" border-radius="8px" padding="12px 16px">
-            {detail_content}
-          </mj-column>
-        </mj-section>
-            """
+            _chart_section_mjml(
+                cid,
+                chart_title,
+                f"{summary.location_name} {chart_title}",
+                chart_legend_mjml(chart_legends.get(cid, [])),
+                chart_images[cid] if embed_base64 else None,
+            )
         )
 
-    span = metrics.get("span")
-    if span and span.get("top_circuits"):
-        rows = [[c["name"], _fmt_num(c["energy_kwh"], suffix=" kWh")] for c in span["top_circuits"]]
-        parts.append(
-            f"""
-        <mj-section background-color="#ffffff" padding="8px 20px 16px 20px">
-          <mj-column>
-            <mj-text font-size="15px" font-weight="600" color="{COLORS['text']}" padding-bottom="8px">
-              Top Circuits by Energy
-            </mj-text>
-            {metrics_table_mjml(["Circuit", "Energy"], rows)}
-          </mj-column>
-        </mj-section>
-            """
-        )
+    if period_type != "daily":
+        detail_lines = _legacy_detail_lines(metrics)
+        if detail_lines:
+            detail_content = "".join(_detail_line(line) for line in detail_lines)
+            parts.append(
+                f"""
+            <mj-section background-color="#ffffff" padding="0 20px 12px 20px">
+              <mj-column background-color="#f1f5f9" border-radius="8px" padding="12px 16px">
+                {detail_content}
+              </mj-column>
+            </mj-section>
+                """
+            )
 
-    parts.append(
-        """
-    <mj-section padding="0 20px">
-      <mj-column>
-        <mj-divider border-color="#e2e8f0" border-width="1px" />
-      </mj-column>
-    </mj-section>
-    """
-    )
-
+    parts.append(_divider_mjml())
     return "".join(parts)
 
 
