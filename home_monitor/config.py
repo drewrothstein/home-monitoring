@@ -221,6 +221,28 @@ def get_tankutility_credentials() -> Tuple[Optional[str], Optional[str]]:
     return (email, password)
 
 
+def get_centri_credentials(
+    location_name: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Get Centri Connect (MyPropane) credentials from environment variables.
+
+    The device ID lives in sites.json (``centri.device_id``); the user ID and per-device
+    auth code are secrets kept in .env. Both support location-specific overrides:
+    - Global: CENTRI_USER_ID, CENTRI_DEVICE_AUTH
+    - Location-specific: CENTRI_USER_ID_{LOCATION_NAME}, CENTRI_DEVICE_AUTH_{LOCATION_NAME}
+
+    Args:
+        location_name: Optional location name for location-specific credentials
+
+    Returns:
+        Tuple of (user_id, device_auth)
+    """
+    user_id = _get_location_credential("CENTRI_USER_ID", location_name)
+    device_auth = _get_location_credential("CENTRI_DEVICE_AUTH", location_name)
+    return (user_id, device_auth)
+
+
 def get_iaqualink_credentials() -> Tuple[Optional[str], Optional[str]]:
     """
     Get iAqualink credentials from environment variables.

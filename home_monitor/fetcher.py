@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import psutil
 
+from home_monitor.apis.centri import CentriApiClient
 from home_monitor.apis.enphase import EnphaseApiClient
 from home_monitor.apis.flume import FlumeApiClient
 from home_monitor.apis.iaqualink import IAqualinkApiClient
@@ -16,6 +17,7 @@ from home_monitor.apis.tankutility import TankUtilityApiClient
 from home_monitor.apis.tempest import TempestApiClient
 from home_monitor.apis.tesla import TeslaApiClient
 from home_monitor.config import (
+    get_centri_credentials,
     get_enphase_credentials,
     get_enphase_fetch_interval_cycles,
     get_flume_credentials,
@@ -32,6 +34,8 @@ from home_monitor.database import (
     get_battery_banks_by_energy_site,
     get_enphase_gateway_token,
     get_last_span_circuit_reading_time,
+    get_latest_propane_reading,
+    get_propane_reading_exists,
     get_span_panel_token_by_host,
     get_sprinkler_run_exists,
     init_database,
@@ -886,6 +890,100 @@ def fetch_tankutility_data(site_name: str, site_config: dict, location_id: int):
         logger.error(f"[TankUtility] Error fetching data for {site_name}: {e}", exc_info=True)
 
 
+def fetch_centri_data(site_name: str, site_config: dict, location_id: int):
+    """
+    Fetch data from Centri Connect (MyPropane) API and store propane tank readings.
+
+    The tank monitor only posts a few times per day and reports when its next post is
+    due (NextPostTimeIso), so the API is skipped until that time has passed, and a
+    reading already stored for the same post timestamp is not inserted again.
+
+    Args:
+        site_name: Site name (e.g., "NY", "FL")
+        site_config: Site configuration dictionary
+        location_id: Database location ID
+    """
+    try:
+        centri_config = site_config.get("centri")
+        if not centri_config:
+            logger.debug(f"[Centri] Not configured for site {site_name}")
+            return
+
+        user_id, device_auth = get_centri_credentials(site_name)
+        if not user_id or not device_auth:
+            logger.warning(
+                f"[Centri] Credentials not found for site {site_name}. "
+                "Set CENTRI_USER_ID and CENTRI_DEVICE_AUTH in your .env file."
+            )
+            return
+
+        device_id = centri_config.get("device_id")
+        if not device_id:
+            logger.warning(f"[Centri] device_id not configured for site {site_name}")
+            return
+        device_id = str(device_id)
+
+        # Skip the API call until the device's next scheduled post
+        latest = get_latest_propane_reading(device_id=device_id, source="centri")
+        if latest and isinstance(latest.get("raw_data"), dict):
+            next_post = CentriApiClient.parse_timestamp(latest["raw_data"].get("NextPostTimeIso"))
+            if next_post and datetime.now(timezone.utc) < next_post:
+                logger.info(
+                    f"[Centri] Skipping fetch for {site_name}; next device post at "
+                    f"{next_post.isoformat()}"
+                )
+                return
+
+        logger.info(f"[Centri] Fetching data for {site_name}, Device ID: {device_id}")
+        client = CentriApiClient(
+            user_id=user_id,
+            device_id=device_id,
+            device_auth=device_auth,
+            tz=site_config.get("timezone"),
+        )
+        data = client.fetch_current_data()
+
+        if data.get("tank_level_percent") is None:
+            logger.warning(
+                f"[Centri] No tank level data returned for {site_name}. "
+                f"Raw data keys: {list((data.get('raw_data') or {}).keys())}"
+            )
+            return
+
+        if get_propane_reading_exists(location_id, device_id, data["timestamp"]):
+            logger.info(
+                f"[Centri] Reading at {data['timestamp']} already stored for {site_name}; "
+                "device has not posted new data yet"
+            )
+            return
+
+        insert_propane_reading(
+            location_id=location_id,
+            device_id=device_id,
+            timestamp=data["timestamp"],
+            tank_level_percent=data.get("tank_level_percent"),
+            tank_level_gallons=data.get("tank_level_gallons"),
+            capacity_gallons=data.get("capacity_gallons"),
+            temperature_f=data.get("temperature_f"),
+            battery_status=data.get("battery_status"),
+            battery_warn=data.get("battery_warn"),
+            battery_crit=data.get("battery_crit"),
+            fuel_type=data.get("fuel_type"),
+            source="centri",
+            raw_data=data.get("raw_data"),
+        )
+        gallons = data.get("tank_level_gallons")
+        capacity = data.get("capacity_gallons")
+        gallons_str = f"{gallons:.0f}/{capacity:.0f}" if gallons is not None and capacity else "n/a"
+        logger.info(
+            f"[Centri] Successfully fetched data for {site_name} "
+            f"(level={data['tank_level_percent']:.1f}%, gallons={gallons_str})"
+        )
+
+    except Exception as e:
+        logger.error(f"[Centri] Error fetching data for {site_name}: {e}", exc_info=True)
+
+
 def fetch_iaqualink_data(site_name: str, site_config: dict, location_id: int):
     """
     Fetch data from iAqualink API and store pool readings in database.
@@ -1260,6 +1358,8 @@ def fetch_all_data(cycle_count: int = 0, track_summary: bool = True):
                 integrations.append("Rachio")
             if "tankutility" in site_config:
                 integrations.append("TankUtility")
+            if "centri" in site_config:
+                integrations.append("Centri")
             if "iaqualink" in site_config:
                 integrations.append("iAqualink")
             if "span" in site_config:
@@ -1330,6 +1430,10 @@ def fetch_all_data(cycle_count: int = 0, track_summary: bool = True):
                 safe_fetch(
                     "tankutility", fetch_tankutility_data, site_name, site_config, location_id
                 )
+
+            # Fetch Centri Connect (MyPropane) propane data (optional)
+            if "centri" in site_config:
+                safe_fetch("centri", fetch_centri_data, site_name, site_config, location_id)
 
             # Fetch iAqualink pool data (optional)
             if "iaqualink" in site_config:

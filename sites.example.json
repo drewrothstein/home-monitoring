@@ -40,6 +40,9 @@
       "tankutility": {
         "device_id": "your_tank_utility_device_id_here"
       },
+      "centri": {
+        "device_id": "your_centri_device_id_here"
+      },
       "iaqualink": {
         "serial_number": "your_pool_controller_serial",
         "device_name": "Pool Controller"

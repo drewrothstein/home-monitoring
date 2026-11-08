@@ -441,7 +441,7 @@ test-service:  ## [local] 🧪 Test an API service (usage: make test-service SER
 		echo "Usage: make test-service SERVICE=<service> [LOCATION=name] [SAVE_TO_DB=1] [HIDE_RAW=1] ..."; \
 		echo ""; \
 		echo "Options:"; \
-		echo "  SERVICE        - Service to test (required): tesla, enphase, openweather, tempest, flume, rachio, tankutility, or iaqualink"; \
+		echo "  SERVICE        - Service to test (required): tesla, enphase, openweather, tempest, flume, rachio, tankutility, centri, or iaqualink"; \
 		echo "  LOCATION       - Location name (optional, uses first available if not specified)"; \
 		echo "  SAVE_TO_DB     - Save fetched data to database (optional, default: false)"; \
 		echo "  HIDE_RAW       - Hide raw API response (optional, default: false)"; \
@@ -450,7 +450,7 @@ test-service:  ## [local] 🧪 Test an API service (usage: make test-service SER
 		echo "  STATION_ID     - Station ID for testing without database (optional, Tempest only)"; \
 		echo "  ENERGY_SITE_ID - Energy Site ID for testing without database (optional, Tesla only)"; \
 		echo "  SYSTEM_ID      - System ID for testing without database (Enphase only)"; \
-		echo "  DEVICE_ID      - Device ID for testing without database (Flume/Rachio only)"; \
+		echo "  DEVICE_ID      - Device ID override (Flume/Rachio/TankUtility/Centri)"; \
 		echo ""; \
 		echo "Examples:"; \
 		echo "  make test-service SERVICE=tesla"; \
@@ -467,6 +467,7 @@ test-service:  ## [local] 🧪 Test an API service (usage: make test-service SER
 		echo "  make test-service SERVICE=rachio DEVICE_ID=<device_id>  # Test without database"; \
 		echo "  make test-service SERVICE=tankutility LOCATION=FL"; \
 		echo "  make test-service SERVICE=tankutility DEVICE_ID=<device_id>  # Test without database"; \
+		echo "  make test-service SERVICE=centri LOCATION=NY"; \
 		echo "  make test-service SERVICE=iaqualink  # Test iAqualink pool controller"; \
 		echo "  make test-service SERVICE=iaqualink LOCATION=FL SAVE_TO_DB=1"; \
 		exit 1; \

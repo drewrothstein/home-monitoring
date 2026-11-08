@@ -45,7 +45,7 @@ A multi-location home monitoring application that collects data from various API
 ## Features
 
 - **Multi-location support**: Track multiple homes/properties from a single configuration
-- **Multiple API integrations**: Tesla/Powerwall, Enphase solar, Span panels, OpenWeather, Tempest weather stations, Flume water meters, Tank Utility propane monitors, iAqualink pool controllers
+- **Multiple API integrations**: Tesla/Powerwall, Enphase solar, Span panels, OpenWeather, Tempest weather stations, Flume water meters, Tank Utility and Centri Connect (MyPropane) propane monitors, iAqualink pool controllers
 - **PostgreSQL database**: Time-series data storage compatible with Grafana
 - **Auto-provisioned Grafana dashboard**: Pre-configured dashboards for immediate visualization
 - **Docker-ready**: Easy deployment to any Docker-capable host (Raspberry Pi, NAS, etc.)
@@ -102,6 +102,7 @@ All integrations are **optional**. Configure only the ones you have hardware/acc
 | **Flume** | Water Usage | Smart water meter readings |
 | **Rachio** | Sprinkler Runs | Irrigation controller watering events |
 | **Tank Utility** | Propane Levels | Propane tank monitoring (fill level, temperature) |
+| **Centri Connect** | Propane Levels | MyPropane tank monitoring (fill level, temperature, battery/solar/LTE) |
 | **iAqualink** | Pool/Spa | Pool controller monitoring (temps, pumps, heaters) |
 | **Span** | Electrical Panel | Smart panel circuit-level power monitoring |
 
@@ -165,6 +166,8 @@ All API integrations are **optional**. Only configure credentials for the servic
 | `RACHIO_API_KEY` | Rachio | Rachio API key |
 | `TANK_UTILITY_EMAIL` | Tank Utility | Tank Utility account email |
 | `TANK_UTILITY_PASSWORD` | Tank Utility | Tank Utility account password |
+| `CENTRI_USER_ID` | Centri Connect | MyPropane account User ID (supports `_{LOCATION}` suffix) |
+| `CENTRI_DEVICE_AUTH` | Centri Connect | Device authentication code from the setup card (supports `_{LOCATION}` suffix) |
 | `IAQUALINK_EMAIL` | iAqualink | iAqualink account email |
 | `IAQUALINK_PASSWORD` | iAqualink | iAqualink account password |
 
@@ -288,6 +291,9 @@ Define your locations and API configurations in `sites.json`. All integrations a
       "tankutility": {
         "device_id": "def456"
       },
+      "centri": {
+        "device_id": "123a4b5c-678d-9e0f-a123-4b567c8d901e"
+      },
       "iaqualink": {
         "serial_number": "your_pool_controller_serial",
         "device_name": "Pool Controller"
@@ -323,6 +329,7 @@ All API integrations are optional. Configure only the ones you have hardware/acc
 | `flume.device_id` | Flume water meter device ID |
 | `rachio.device_id` | Rachio sprinkler controller device ID |
 | `tankutility.device_id` | Tank Utility propane monitor device ID |
+| `centri.device_id` | Centri Connect (MyPropane) tank monitor device ID |
 | `iaqualink.serial_number` | iAqualink pool controller serial number |
 | `iaqualink.device_name` | iAqualink device name (alternative to serial_number) |
 | `span.panels` | Array of Span panel configs (host + name) |
@@ -846,6 +853,43 @@ Tank Utility monitors propane tank levels using cellular-connected sensors.
 - Battery status (good/low/critical)
 - Fuel type
 
+### Centri Connect (MyPropane) API
+
+Centri Connect monitors propane tank levels using solar-powered LTE sensors, branded as MyPropane.
+The client is a small synchronous implementation modeled on the
+[aiocentriconnect](https://pypi.org/project/aiocentriconnect/) library used by Home Assistant.
+
+1. **Find identifiers**:
+   - **Device ID**: printed on the back of the tank monitor or on the setup card
+   - **Device Authentication Code**: on the setup card
+   - **User ID**: in the MyPropane app under **Account**
+2. **Configure** in `.env` (use `CENTRI_DEVICE_AUTH_{LOCATION}` for multiple tanks/sites):
+   ```bash
+   CENTRI_USER_ID=your_user_id
+   CENTRI_DEVICE_AUTH=your_device_auth_code
+   ```
+3. **Add to sites.json**:
+   ```json
+   "centri": {
+     "device_id": "your_device_id"
+   }
+   ```
+4. **Test**:
+   ```bash
+   make test-service SERVICE=centri LOCATION=NY
+   ```
+
+**Polling**: The monitor only posts new data 2-3 times per day. The fetcher skips the API until the
+device's reported next post time (`NextPostTimeIso`) has passed, and does not store duplicate
+readings for the same post.
+
+**Data collected** (stored in `propane_readings` with `source = 'centri'`):
+- Tank fill level (percentage and estimated gallons; liters are converted to gallons)
+- Tank capacity
+- Device temperature
+- Battery status (good/low/critical, estimated from battery voltage)
+- Battery/solar voltage, LTE signal, alert status (in `raw_data_*` columns)
+
 ### iAqualink API
 
 iAqualink monitors pool and spa equipment from Zodiac/Jandy pool controllers.
@@ -1130,7 +1174,7 @@ curl -X POST "http://localhost:8000/reports/generate?period=daily&send=true"
 | `irradiance_readings` | Solar irradiance measurements |
 | `water_readings` | Water usage from Flume meters |
 | `sprinkler_runs` | Rachio sprinkler watering events |
-| `propane_readings` | Propane tank levels from Tank Utility |
+| `propane_readings` | Propane tank levels from Tank Utility and Centri Connect |
 | `pool_readings` | Pool/spa data from iAqualink |
 | `span_panel_tokens` | Span panel access tokens |
 | `span_panel_readings` | Panel-level power data (grid power, status) |
@@ -1292,6 +1336,7 @@ home-monitor/
 │   │   ├── flume.py
 │   │   ├── rachio.py
 │   │   ├── tankutility.py
+│   │   ├── centri.py
 │   │   ├── iaqualink.py
 │   │   └── span.py
 │   ├── api.py              # REST API (FastAPI)

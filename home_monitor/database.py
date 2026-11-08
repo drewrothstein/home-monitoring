@@ -712,7 +712,7 @@ def init_database():
                 ],
             )
 
-            # Create propane_readings table for Tank Utility propane tank monitoring
+            # Create propane_readings table for propane tank monitoring (Tank Utility, Centri)
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS propane_readings (
@@ -816,6 +816,25 @@ def init_database():
                     ("raw_data_device_telemetry_time_to_conn", "TEXT"),
                     ("raw_data_device_telemetry_tlm_time", "TEXT"),
                     ("raw_data_device_telemetry_type", "TEXT"),
+                    # Centri Connect (MyPropane) device fields (raw_data is the device dict)
+                    ("raw_data_AlertStatus", "TEXT"),
+                    ("raw_data_Altitude", "TEXT"),
+                    ("raw_data_BatteryVolts", "TEXT"),
+                    ("raw_data_DeviceID", "TEXT"),
+                    ("raw_data_DeviceName", "TEXT"),
+                    ("raw_data_DeviceTempCelsius", "TEXT"),
+                    ("raw_data_DeviceTempFahrenheit", "TEXT"),
+                    ("raw_data_LastPostTimeIso", "TEXT"),
+                    ("raw_data_Latitude", "TEXT"),
+                    ("raw_data_Longitude", "TEXT"),
+                    ("raw_data_NextPostTimeIso", "TEXT"),
+                    ("raw_data_SignalQualLTE", "TEXT"),
+                    ("raw_data_SolarVolts", "TEXT"),
+                    ("raw_data_TankLevel", "TEXT"),
+                    ("raw_data_TankSize", "TEXT"),
+                    ("raw_data_TankSizeUnit", "TEXT"),
+                    ("raw_data_VersionHW", "TEXT"),
+                    ("raw_data_VersionLTE", "TEXT"),
                     # Raw data JSONB - MUST be last column
                     ("raw_data", "JSONB"),
                 ],
@@ -1730,6 +1749,47 @@ def get_sprinkler_run_exists(
                 LIMIT 1
                 """,
                 (location_id, device_id, zone_id, start_time),
+            )
+            return cur.fetchone() is not None
+
+
+def get_latest_propane_reading(device_id: str, source: str) -> Optional[Dict[str, Any]]:
+    """
+    Get the most recently fetched propane reading for a device and source.
+
+    Returns:
+        Dict with timestamp, created_at, and raw_data (parsed), or None if no readings
+    """
+    with get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT timestamp, created_at, raw_data
+                FROM propane_readings
+                WHERE device_id = %s
+                  AND source = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (device_id, source),
+            )
+            row = cur.fetchone()
+            return _row_to_dict(row, ["raw_data"]) if row else None
+
+
+def get_propane_reading_exists(location_id: int, device_id: str, timestamp: datetime) -> bool:
+    """Check whether a propane reading for this device and timestamp is already stored."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM propane_readings
+                WHERE location_id = %s
+                  AND device_id = %s
+                  AND timestamp = %s
+                LIMIT 1
+                """,
+                (location_id, device_id, timestamp),
             )
             return cur.fetchone() is not None
 

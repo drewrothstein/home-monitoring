@@ -1,7 +1,7 @@
 """
 Test script for testing individual API services independently.
 
-This script allows you to test each service (Tesla, Enphase, OpenWeather, Tempest, Flume, Rachio, TankUtility)
+This script allows you to test each service (Tesla, Enphase, OpenWeather, Tempest, Flume, Rachio, TankUtility, Centri)
 independently to review data and debug issues without running the full fetch cycle.
 
 Usage:
@@ -37,6 +37,7 @@ script_dir = Path(__file__).parent
 project_root = script_dir.parent
 sys.path.insert(0, str(project_root))
 
+from home_monitor.apis.centri import CentriApiClient  # noqa: E402
 from home_monitor.apis.enphase import EnphaseApiClient  # noqa: E402
 from home_monitor.apis.flume import FlumeApiClient  # noqa: E402
 from home_monitor.apis.iaqualink import IAqualinkApiClient  # noqa: E402
@@ -46,6 +47,7 @@ from home_monitor.apis.tankutility import TankUtilityApiClient  # noqa: E402
 from home_monitor.apis.tempest import TempestApiClient  # noqa: E402
 from home_monitor.apis.tesla import TeslaApiClient  # noqa: E402
 from home_monitor.config import (  # noqa: E402
+    get_centri_credentials,
     get_enphase_credentials,
     get_flume_credentials,
     get_iaqualink_credentials,
@@ -763,6 +765,95 @@ def test_tankutility(
         return False, None
 
 
+def test_centri(
+    location: Dict[str, Any], api_config: Dict[str, Any], save: bool = False
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """Test Centri Connect (MyPropane) API service. Returns (success, data)."""
+    print_section("Testing Centri Connect (MyPropane) API")
+
+    user_id, device_auth = get_centri_credentials(location.get("name"))
+    if not user_id or not device_auth:
+        print("❌ ERROR: Centri credentials not found in environment variables")
+        print("   Set CENTRI_USER_ID and CENTRI_DEVICE_AUTH in your .env file")
+        return False, None
+
+    config = api_config.get("config", {})
+    if isinstance(config, str):
+        config = json.loads(config)
+
+    device_id = config.get("device_id")
+    if not device_id:
+        print("❌ ERROR: Centri device_id not configured")
+        print('   Add it via: "centri": {"device_id": "..."} in sites.json')
+        return False, None
+
+    print(f"Location: {location['name']}")
+    print(f"Device ID: {device_id}")
+    print(f"User ID: {user_id}")
+
+    try:
+        print("\n📡 Fetching data from Centri Connect API...")
+        client = CentriApiClient(
+            user_id=user_id,
+            device_id=str(device_id),
+            device_auth=device_auth,
+            tz=config.get("timezone"),
+        )
+        data = client.fetch_current_data()
+
+        print_section("Normalized Data")
+        print_data("Timestamp (last post)", data.get("timestamp"))
+        print_data("Next Post (UTC)", data.get("next_post_time"))
+        print("\nTank Data:")
+        print_data("  Tank Level (%)", data.get("tank_level_percent"))
+        print_data("  Tank Level (gallons)", data.get("tank_level_gallons"))
+        print_data("  Capacity (gallons)", data.get("capacity_gallons"))
+        print_data("  Temperature (°F)", data.get("temperature_f"))
+        print("\nDevice Info:")
+        print_data("  Device Name", data.get("device_name"))
+        print_data("  Alert Status", data.get("alert_status"))
+        print_data("  LTE Signal (dBm)", data.get("lte_signal_dbm"))
+        print_data("  Solar (V)", data.get("solar_volts"))
+        print("\nBattery Status:")
+        print_data("  Battery (V)", data.get("battery_volts"))
+        print_data("  Battery (est. %)", data.get("battery_percent"))
+        print_data("  Battery Status", data.get("battery_status"))
+
+        if save:
+            if location.get("id") == 0:
+                print("❌ ERROR: Cannot save to database - no valid location ID")
+                print("   Use database location or set DATABASE_URL")
+                return False, data
+
+            print_section("Saving to Database")
+            if data.get("tank_level_percent") is not None:
+                propane_reading_id = insert_propane_reading(
+                    location_id=location["id"],
+                    device_id=str(device_id),
+                    timestamp=data["timestamp"],
+                    tank_level_percent=data.get("tank_level_percent"),
+                    tank_level_gallons=data.get("tank_level_gallons"),
+                    capacity_gallons=data.get("capacity_gallons"),
+                    temperature_f=data.get("temperature_f"),
+                    battery_status=data.get("battery_status"),
+                    battery_warn=data.get("battery_warn"),
+                    battery_crit=data.get("battery_crit"),
+                    fuel_type=data.get("fuel_type"),
+                    source="centri",
+                    raw_data=data.get("raw_data"),
+                )
+                print(f"✓ Saved propane reading (ID: {propane_reading_id})")
+            else:
+                print("⚠ No tank level data to save")
+
+        return True, data
+
+    except Exception as e:
+        print(f"\n❌ ERROR: {e}")
+        logger.exception("Error testing Centri Connect API")
+        return False, None
+
+
 def test_iaqualink(
     location: Dict[str, Any], api_config: Dict[str, Any], save: bool = False
 ) -> Tuple[bool, Optional[Dict[str, Any]]]:
@@ -1229,6 +1320,22 @@ def find_location_and_config(
             "enabled": True,
             "config": {"device_id": device_id},
         }
+    elif service_name == "centri":
+        if "centri" not in site_config:
+            print(f"❌ ERROR: Centri not configured for site '{site_name}'")
+            return None, None
+        if device_id is None:
+            device_id = site_config["centri"].get("device_id")
+        if not device_id:
+            print(f"❌ ERROR: Centri device_id not configured for site '{site_name}'")
+            return None, None
+        mock_config = {
+            "id": 0,
+            "location_id": 0,
+            "api_type": "centri",
+            "enabled": True,
+            "config": {"device_id": device_id, "timezone": site_config.get("timezone")},
+        }
     elif service_name == "iaqualink":
         # iAqualink doesn't require site config - credentials come from env vars
         iaqualink_config = site_config.get("iaqualink", {})
@@ -1321,6 +1428,7 @@ Examples:
   python scripts/test_service.py rachio --device-id <device_id>  # Test without database
   python scripts/test_service.py tankutility --location "FL"
   python scripts/test_service.py tankutility --device-id <device_id>  # Test without database
+  python scripts/test_service.py centri --location "NY"
         """,
     )
     parser.add_argument(
@@ -1333,6 +1441,7 @@ Examples:
             "flume",
             "rachio",
             "tankutility",
+            "centri",
             "iaqualink",
             "span",
         ],
@@ -1382,7 +1491,7 @@ Examples:
     parser.add_argument(
         "--device-id",
         type=str,
-        help="Device ID for testing without database (Flume/Rachio only)",
+        help="Device ID override (Flume/Rachio/TankUtility/Centri)",
     )
     parser.add_argument(
         "--panel-host",
@@ -1430,6 +1539,8 @@ Examples:
             success, data = test_rachio(location, api_config, args.save)
         elif args.service == "tankutility":
             success, data = test_tankutility(location, api_config, args.save)
+        elif args.service == "centri":
+            success, data = test_centri(location, api_config, args.save)
         elif args.service == "iaqualink":
             success, data = test_iaqualink(location, api_config, args.save)
         elif args.service == "span":
