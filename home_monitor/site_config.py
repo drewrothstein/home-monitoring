@@ -198,6 +198,14 @@ def validate_site_config(site_name: str, site_config: Dict[str, Any]) -> None:
                     f"Site '{site_name}': 'rachio.device_id' must be an integer or string"
                 )
 
+    # Centri Connect (MyPropane) is optional
+    if "centri" in site_config:
+        if not isinstance(site_config["centri"], dict):
+            raise ValueError(f"Site '{site_name}': 'centri' must be a dictionary")
+        if "device_id" in site_config["centri"]:
+            if not isinstance(site_config["centri"]["device_id"], str):
+                raise ValueError(f"Site '{site_name}': 'centri.device_id' must be a string")
+
     # Span is optional
     if "span" in site_config:
         if not isinstance(site_config["span"], dict):

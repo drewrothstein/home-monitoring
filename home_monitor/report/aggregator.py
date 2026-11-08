@@ -26,6 +26,7 @@ INTEGRATION_KEYS = {
     "flume": "water",
     "rachio": "water",
     "tankutility": "propane",
+    "centri": "propane",
     "iaqualink": "pool",
     "span": "span",
     "tempest": "tempest",
@@ -42,6 +43,13 @@ def _site_timezone(site_name: str, site_config: dict, db_timezone: Optional[str]
 
 def _has_integration(site_config: dict, key: str) -> bool:
     return key in site_config
+
+
+PROPANE_INTEGRATIONS = ("tankutility", "centri")
+
+
+def _has_propane(site_config: dict) -> bool:
+    return any(_has_integration(site_config, key) for key in PROPANE_INTEGRATIONS)
 
 
 TRAILING_DAYS = 7
@@ -130,7 +138,7 @@ def _add_daily_interpretations(
             if water_card:
                 cards.append(water_card)
 
-    if _has_integration(site_config, "tankutility"):
+    if _has_propane(site_config):
         today_gal = queries.fetch_propane_usage_gallons(location_id, start, end)
         if today_gal is not None:
             week_gal = queries.fetch_propane_usage_gallons(location_id, trail_start, trail_end)
@@ -190,7 +198,7 @@ def _add_legacy_details(
         if water:
             metrics["water"] = water
 
-    if _has_integration(site_config, "tankutility"):
+    if _has_propane(site_config):
         propane = queries.fetch_propane_metrics(location_id, start, end)
         if propane:
             metrics["propane"] = propane
