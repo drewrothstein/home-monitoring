@@ -172,6 +172,12 @@ class TestCreatePanels:
             assert "x" in grid_pos
             assert "y" in grid_pos
 
+    def test_create_panels_ids_are_unique(self):
+        """Test that no two panels share an id (Grafana uses ids for links and editing)."""
+        ids = [panel["id"] for panel in create_panels()]
+        duplicates = sorted({i for i in ids if ids.count(i) > 1})
+        assert not duplicates, f"Duplicate panel ids: {duplicates}"
+
     def test_create_panels_has_expected_panels(self):
         """Test that expected panels are created."""
         panels = create_panels()
