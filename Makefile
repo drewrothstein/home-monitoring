@@ -441,7 +441,7 @@ test-service:  ## [local] 🧪 Test an API service (usage: make test-service SER
 		echo "Usage: make test-service SERVICE=<service> [LOCATION=name] [SAVE_TO_DB=1] [HIDE_RAW=1] ..."; \
 		echo ""; \
 		echo "Options:"; \
-		echo "  SERVICE        - Service to test (required): tesla, enphase, openweather, tempest, flume, rachio, tankutility, centri, or iaqualink"; \
+		echo "  SERVICE        - Service to test (required): tesla, enphase, openweather, tempest, flume, rachio, tankutility, centri, aranet, or iaqualink"; \
 		echo "  LOCATION       - Location name (optional, uses first available if not specified)"; \
 		echo "  SAVE_TO_DB     - Save fetched data to database (optional, default: false)"; \
 		echo "  HIDE_RAW       - Hide raw API response (optional, default: false)"; \
@@ -468,6 +468,7 @@ test-service:  ## [local] 🧪 Test an API service (usage: make test-service SER
 		echo "  make test-service SERVICE=tankutility LOCATION=FL"; \
 		echo "  make test-service SERVICE=tankutility DEVICE_ID=<device_id>  # Test without database"; \
 		echo "  make test-service SERVICE=centri LOCATION=NY"; \
+		echo "  make test-service SERVICE=aranet LOCATION=NY  # Lists bases + sensors (all if site has no aranet config)"; \
 		echo "  make test-service SERVICE=iaqualink  # Test iAqualink pool controller"; \
 		echo "  make test-service SERVICE=iaqualink LOCATION=FL SAVE_TO_DB=1"; \
 		exit 1; \

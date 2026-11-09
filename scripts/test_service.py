@@ -1,7 +1,7 @@
 """
 Test script for testing individual API services independently.
 
-This script allows you to test each service (Tesla, Enphase, OpenWeather, Tempest, Flume, Rachio, TankUtility, Centri)
+This script allows you to test each service (Tesla, Enphase, OpenWeather, Tempest, Flume, Rachio, TankUtility, Centri, Aranet)
 independently to review data and debug issues without running the full fetch cycle.
 
 Usage:
@@ -22,6 +22,7 @@ Examples:
     python scripts/test_service.py rachio --device-id <device_id>  # Test without database
     python scripts/test_service.py tankutility --location "FL"
     python scripts/test_service.py tankutility --device-id <device_id>  # Test without database
+    python scripts/test_service.py aranet --location "NY"
 """
 
 import argparse
@@ -37,6 +38,7 @@ script_dir = Path(__file__).parent
 project_root = script_dir.parent
 sys.path.insert(0, str(project_root))
 
+from home_monitor.apis.aranet import AranetApiClient  # noqa: E402
 from home_monitor.apis.centri import CentriApiClient  # noqa: E402
 from home_monitor.apis.enphase import EnphaseApiClient  # noqa: E402
 from home_monitor.apis.flume import FlumeApiClient  # noqa: E402
@@ -47,6 +49,7 @@ from home_monitor.apis.tankutility import TankUtilityApiClient  # noqa: E402
 from home_monitor.apis.tempest import TempestApiClient  # noqa: E402
 from home_monitor.apis.tesla import TeslaApiClient  # noqa: E402
 from home_monitor.config import (  # noqa: E402
+    get_aranet_api_key,
     get_centri_credentials,
     get_enphase_credentials,
     get_flume_credentials,
@@ -58,6 +61,7 @@ from home_monitor.config import (  # noqa: E402
     get_tesla_credentials,
 )
 from home_monitor.database import (  # noqa: E402
+    insert_aranet_readings,
     insert_battery_reading,
     insert_irradiance_reading,
     insert_pool_reading,
@@ -65,6 +69,7 @@ from home_monitor.database import (  # noqa: E402
     insert_propane_reading,
     insert_sprinkler_run,
     insert_water_reading,
+    upsert_aranet_sensors,
 )
 from home_monitor.site_config import (  # noqa: E402
     ensure_site_in_database,
@@ -854,6 +859,90 @@ def test_centri(
         return False, None
 
 
+def test_aranet(
+    location: Dict[str, Any], api_config: Dict[str, Any], save: bool = False
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """Test Aranet Cloud API service. Returns (success, data)."""
+    print_section("Testing Aranet Cloud API")
+
+    api_key = get_aranet_api_key(location.get("name"))
+    if not api_key:
+        print("❌ ERROR: Aranet API key not found in environment variables")
+        print("   Set ARANET_API_KEY in your .env file")
+        return False, None
+
+    config = api_config.get("config", {})
+    if isinstance(config, str):
+        config = json.loads(config)
+
+    base_ids = [str(b) for b in config.get("base_ids") or []]
+    sensor_ids = [str(s) for s in config.get("sensor_ids") or []]
+
+    print(f"Location: {location['name']}")
+    print(f"Base IDs: {base_ids or '(none)'}")
+    print(f"Sensor IDs: {sensor_ids or '(none)'}")
+    if not base_ids and not sensor_ids:
+        print("ℹ️  No aranet config for this site - showing all sensors in the workspace")
+
+    try:
+        client = AranetApiClient(api_key=api_key)
+
+        print("\n📡 Fetching base stations...")
+        print_section("Base Stations (workspace)")
+        for base in client.get_bases():
+            print(f"  {base.get('id')}  {base.get('name')}  (firmware {base.get('firmware')})")
+
+        print("\n📡 Fetching sensors and latest readings...")
+        data = client.fetch_site_data(base_ids=base_ids, sensor_ids=sensor_ids)
+
+        print_section(f"Sensors ({len(data['sensors'])})")
+        readings_by_sensor: Dict[str, list] = {}
+        for reading in data["readings"]:
+            readings_by_sensor.setdefault(reading["sensor_id"], []).append(reading)
+
+        for sensor in data["sensors"]:
+            print(
+                f"\n  {sensor['name']}  [id {sensor['sensor_id']}, device {sensor['device_id']}, "
+                f"{sensor.get('sensor_type_name') or sensor.get('sensor_type')}, "
+                f"base {sensor.get('base_id')}]"
+            )
+            for reading in sorted(
+                readings_by_sensor.get(sensor["sensor_id"], []), key=lambda r: r["metric_key"]
+            ):
+                value = reading["value"]
+                value_str = f"{value:.1f}" if isinstance(value, float) else str(value)
+                print(
+                    f"    {reading['metric_key']:<12} {value_str:>8} {reading.get('unit') or ''}"
+                    f"  ({reading['timestamp'].isoformat()}, {reading.get('novelty') or '-'})"
+                )
+
+        if save:
+            if location.get("id") == 0:
+                print("❌ ERROR: Cannot save to database - no valid location ID")
+                print("   Use database location or set DATABASE_URL")
+                return False, data
+            if not base_ids and not sensor_ids:
+                print("❌ ERROR: Not saving - configure aranet.base_ids for this site first")
+                return False, data
+
+            print_section("Saving to Database")
+            upserted = upsert_aranet_sensors(location["id"], data["sensors"])
+            names = {s["sensor_id"]: s.get("name") for s in data["sensors"]}
+            inserted = insert_aranet_readings(location["id"], data["readings"], names)
+            print(f"✓ Upserted {upserted} sensors, inserted {inserted} new readings")
+
+        data["raw_data"] = {
+            "sensors": [s["raw_data"] for s in data["sensors"]],
+            "readings": [r["raw_data"] for r in data["readings"]],
+        }
+        return True, data
+
+    except Exception as e:
+        print(f"\n❌ ERROR: {e}")
+        logger.exception("Error testing Aranet Cloud API")
+        return False, None
+
+
 def test_iaqualink(
     location: Dict[str, Any], api_config: Dict[str, Any], save: bool = False
 ) -> Tuple[bool, Optional[Dict[str, Any]]]:
@@ -1336,6 +1425,19 @@ def find_location_and_config(
             "enabled": True,
             "config": {"device_id": device_id, "timezone": site_config.get("timezone")},
         }
+    elif service_name == "aranet":
+        # Without an aranet section, all workspace sensors are listed (discovery mode)
+        aranet_config = site_config.get("aranet") or {}
+        mock_config = {
+            "id": 0,
+            "location_id": 0,
+            "api_type": "aranet",
+            "enabled": True,
+            "config": {
+                "base_ids": aranet_config.get("base_ids") or [],
+                "sensor_ids": aranet_config.get("sensor_ids") or [],
+            },
+        }
     elif service_name == "iaqualink":
         # iAqualink doesn't require site config - credentials come from env vars
         iaqualink_config = site_config.get("iaqualink", {})
@@ -1429,6 +1531,7 @@ Examples:
   python scripts/test_service.py tankutility --location "FL"
   python scripts/test_service.py tankutility --device-id <device_id>  # Test without database
   python scripts/test_service.py centri --location "NY"
+  python scripts/test_service.py aranet --location "NY"
         """,
     )
     parser.add_argument(
@@ -1442,6 +1545,7 @@ Examples:
             "rachio",
             "tankutility",
             "centri",
+            "aranet",
             "iaqualink",
             "span",
         ],
@@ -1541,6 +1645,8 @@ Examples:
             success, data = test_tankutility(location, api_config, args.save)
         elif args.service == "centri":
             success, data = test_centri(location, api_config, args.save)
+        elif args.service == "aranet":
+            success, data = test_aranet(location, api_config, args.save)
         elif args.service == "iaqualink":
             success, data = test_iaqualink(location, api_config, args.save)
         elif args.service == "span":

@@ -1180,6 +1180,58 @@ def init_database():
             """
             )
 
+            # Create aranet_sensors table for Aranet Cloud sensor metadata (upserted each fetch)
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS aranet_sensors (
+                    id SERIAL PRIMARY KEY,
+                    sensor_id VARCHAR(64) NOT NULL UNIQUE,
+                    location_id INTEGER REFERENCES locations(id) ON DELETE SET NULL,
+                    device_id VARCHAR(64),
+                    name VARCHAR(255),
+                    sensor_type VARCHAR(64),
+                    sensor_type_name VARCHAR(255),
+                    base_id VARCHAR(64),
+                    metric_ids TEXT,
+                    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    raw_data JSONB
+                );
+                CREATE INDEX IF NOT EXISTS idx_aranet_sensors_location_id
+                    ON aranet_sensors(location_id);
+            """
+            )
+
+            # Create aranet_readings table: one row per sensor, metric, probe, and timestamp
+            # (measurements like CO2/radon and telemetry like battery/RSSI). Values are
+            # normalized to a canonical unit per metric_key; the API reading is in raw_data.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS aranet_readings (
+                    id BIGSERIAL PRIMARY KEY,
+                    location_id INTEGER NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
+                    sensor_id VARCHAR(64) NOT NULL,
+                    sensor_name VARCHAR(255),
+                    timestamp TIMESTAMPTZ NOT NULL,
+                    metric_id VARCHAR(32) NOT NULL,
+                    metric_key VARCHAR(64) NOT NULL,
+                    metric_name VARCHAR(255),
+                    value DOUBLE PRECISION,
+                    unit VARCHAR(32),
+                    probe INTEGER NOT NULL DEFAULT 0,
+                    novelty VARCHAR(32),
+                    source VARCHAR(50) NOT NULL DEFAULT 'aranet',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    raw_data JSONB,
+                    UNIQUE (sensor_id, metric_id, probe, timestamp)
+                );
+                CREATE INDEX IF NOT EXISTS idx_aranet_readings_location_metric_time
+                    ON aranet_readings(location_id, metric_key, timestamp);
+                CREATE INDEX IF NOT EXISTS idx_aranet_readings_timestamp
+                    ON aranet_readings(timestamp);
+            """
+            )
+
             # Create fetch_run_summaries table for tracking fetcher runs
             cur.execute(
                 """
@@ -2595,6 +2647,145 @@ def get_last_span_circuit_reading_time(panel_serial: str) -> Optional[datetime]:
                 WHERE panel_serial = %s
                 """,
                 (panel_serial,),
+            )
+            result = cur.fetchone()
+            return result[0] if result and result[0] else None
+
+
+# =============================================================================
+# Aranet Cloud Functions
+# =============================================================================
+
+
+def upsert_aranet_sensors(location_id: int, sensors: List[Dict[str, Any]]) -> int:
+    """
+    Insert or update Aranet sensor metadata (name, type, base) for a location.
+
+    Args:
+        location_id: Database location ID
+        sensors: Normalized sensors from AranetApiClient.normalize_sensor()
+
+    Returns:
+        Number of sensors upserted
+    """
+    if not sensors:
+        return 0
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for sensor in sensors:
+                cur.execute(
+                    """
+                    INSERT INTO aranet_sensors (
+                        sensor_id, location_id, device_id, name, sensor_type,
+                        sensor_type_name, base_id, metric_ids, raw_data
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (sensor_id) DO UPDATE SET
+                        location_id = EXCLUDED.location_id,
+                        device_id = EXCLUDED.device_id,
+                        name = EXCLUDED.name,
+                        sensor_type = EXCLUDED.sensor_type,
+                        sensor_type_name = EXCLUDED.sensor_type_name,
+                        base_id = EXCLUDED.base_id,
+                        metric_ids = EXCLUDED.metric_ids,
+                        raw_data = EXCLUDED.raw_data,
+                        updated_at = NOW()
+                    """,
+                    (
+                        sensor["sensor_id"],
+                        location_id,
+                        sensor.get("device_id"),
+                        sensor.get("name"),
+                        sensor.get("sensor_type"),
+                        sensor.get("sensor_type_name"),
+                        sensor.get("base_id"),
+                        json.dumps(sensor.get("metric_ids") or []),
+                        json.dumps(sensor.get("raw_data")) if sensor.get("raw_data") else None,
+                    ),
+                )
+            return len(sensors)
+
+
+def insert_aranet_readings(
+    location_id: int,
+    readings: List[Dict[str, Any]],
+    sensor_names: Optional[Dict[str, str]] = None,
+    source: str = "aranet",
+) -> int:
+    """
+    Bulk insert Aranet readings, skipping ones already stored.
+
+    Args:
+        location_id: Database location ID
+        readings: Normalized readings from AranetApiClient.normalize_reading()
+        sensor_names: Optional sensor_id -> name mapping (name at time of reading)
+        source: Data source identifier
+
+    Returns:
+        Number of new readings inserted
+    """
+    if not readings:
+        return 0
+
+    from psycopg2.extras import execute_values
+
+    names = sensor_names or {}
+    rows = [
+        (
+            location_id,
+            r["sensor_id"],
+            names.get(r["sensor_id"]),
+            r["timestamp"],
+            r["metric_id"],
+            r["metric_key"],
+            r.get("metric_name"),
+            r.get("value"),
+            r.get("unit"),
+            r.get("probe") or 0,
+            r.get("novelty"),
+            source,
+            json.dumps(r.get("raw_data")) if r.get("raw_data") else None,
+        )
+        for r in readings
+    ]
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            result = execute_values(
+                cur,
+                """
+                INSERT INTO aranet_readings (
+                    location_id, sensor_id, sensor_name, timestamp, metric_id, metric_key,
+                    metric_name, value, unit, probe, novelty, source, raw_data
+                ) VALUES %s
+                ON CONFLICT (sensor_id, metric_id, probe, timestamp) DO NOTHING
+                RETURNING id
+                """,
+                rows,
+                page_size=1000,
+                fetch=True,
+            )
+            return len(result)
+
+
+def get_last_aranet_reading_time(location_id: int) -> Optional[datetime]:
+    """
+    Get the timestamp of the most recent Aranet measurement stored for a location.
+
+    Telemetry (battery/RSSI) is excluded so a gap in measurements is still detected.
+
+    Returns:
+        Timestamp of the latest reading, or None if no readings exist
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT MAX(timestamp) FROM aranet_readings
+                WHERE location_id = %s
+                  AND metric_key NOT IN ('battery', 'rssi')
+                """,
+                (location_id,),
             )
             result = cur.fetchone()
             return result[0] if result and result[0] else None
