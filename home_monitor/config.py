@@ -243,6 +243,43 @@ def get_centri_credentials(
     return (user_id, device_auth)
 
 
+def get_aranet_api_key(location_name: Optional[str] = None) -> Optional[str]:
+    """
+    Get Aranet Cloud API key from environment variables.
+
+    One key covers one Aranet Cloud workspace (usually all locations); sensors are mapped
+    to sites via ``aranet.base_ids`` / ``aranet.sensor_ids`` in sites.json.
+    - Global: ARANET_API_KEY
+    - Location-specific: ARANET_API_KEY_{LOCATION_NAME} (for separate workspaces)
+
+    Args:
+        location_name: Optional location name for a location-specific key
+
+    Returns:
+        API key string or None
+    """
+    return _get_location_credential("ARANET_API_KEY", location_name)
+
+
+def get_aranet_backfill_max_days() -> int:
+    """
+    Get the maximum number of days of Aranet history to backfill.
+
+    Used on the first fetch for a site and after gaps (e.g. fetcher downtime). The Aranet
+    Cloud history endpoint serves at most 7 days; 0 disables backfill.
+
+    Environment variable: ARANET_BACKFILL_MAX_DAYS
+
+    Returns:
+        Days to backfill, clamped to 0-7 (default: 7)
+    """
+    try:
+        days = int(os.getenv("ARANET_BACKFILL_MAX_DAYS", "7"))
+    except ValueError:
+        return 7
+    return max(0, min(days, 7))
+
+
 def get_iaqualink_credentials() -> Tuple[Optional[str], Optional[str]]:
     """
     Get iAqualink credentials from environment variables.
