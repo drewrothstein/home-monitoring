@@ -206,6 +206,21 @@ def validate_site_config(site_name: str, site_config: Dict[str, Any]) -> None:
             if not isinstance(site_config["centri"]["device_id"], str):
                 raise ValueError(f"Site '{site_name}': 'centri.device_id' must be a string")
 
+    # Aranet Cloud is optional
+    if "aranet" in site_config:
+        aranet = site_config["aranet"]
+        if not isinstance(aranet, dict):
+            raise ValueError(f"Site '{site_name}': 'aranet' must be a dictionary")
+        for key in ("base_ids", "sensor_ids"):
+            if key in aranet:
+                values = aranet[key]
+                if not isinstance(values, list) or not all(
+                    isinstance(v, (str, int)) and not isinstance(v, bool) for v in values
+                ):
+                    raise ValueError(
+                        f"Site '{site_name}': 'aranet.{key}' must be a list of strings"
+                    )
+
     # Span is optional
     if "span" in site_config:
         if not isinstance(site_config["span"], dict):

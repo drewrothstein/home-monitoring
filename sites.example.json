@@ -43,6 +43,9 @@
       "centri": {
         "device_id": "your_centri_device_id_here"
       },
+      "aranet": {
+        "base_ids": ["your_aranet_base_station_id"]
+      },
       "iaqualink": {
         "serial_number": "your_pool_controller_serial",
         "device_name": "Pool Controller"

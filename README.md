@@ -45,7 +45,7 @@ A multi-location home monitoring application that collects data from various API
 ## Features
 
 - **Multi-location support**: Track multiple homes/properties from a single configuration
-- **Multiple API integrations**: Tesla/Powerwall, Enphase solar, Span panels, OpenWeather, Tempest weather stations, Flume water meters, Tank Utility and Centri Connect (MyPropane) propane monitors, iAqualink pool controllers
+- **Multiple API integrations**: Tesla/Powerwall, Enphase solar, Span panels, OpenWeather, Tempest weather stations, Flume water meters, Tank Utility and Centri Connect (MyPropane) propane monitors, Aranet PRO air quality and radon sensors, iAqualink pool controllers
 - **PostgreSQL database**: Time-series data storage compatible with Grafana
 - **Auto-provisioned Grafana dashboard**: Pre-configured dashboards for immediate visualization
 - **Docker-ready**: Easy deployment to any Docker-capable host (Raspberry Pi, NAS, etc.)
@@ -103,6 +103,7 @@ All integrations are **optional**. Configure only the ones you have hardware/acc
 | **Rachio** | Sprinkler Runs | Irrigation controller watering events |
 | **Tank Utility** | Propane Levels | Propane tank monitoring (fill level, temperature) |
 | **Centri Connect** | Propane Levels | MyPropane tank monitoring (fill level, temperature, battery/solar/LTE) |
+| **Aranet Cloud** | Indoor Air Quality | Aranet4 PRO (CO₂, temperature, humidity, pressure), Radon Plus PRO, battery/signal |
 | **iAqualink** | Pool/Spa | Pool controller monitoring (temps, pumps, heaters) |
 | **Span** | Electrical Panel | Smart panel circuit-level power monitoring |
 
@@ -168,6 +169,8 @@ All API integrations are **optional**. Only configure credentials for the servic
 | `TANK_UTILITY_PASSWORD` | Tank Utility | Tank Utility account password |
 | `CENTRI_USER_ID` | Centri Connect | MyPropane account User ID (supports `_{LOCATION}` suffix) |
 | `CENTRI_DEVICE_AUTH` | Centri Connect | Device authentication code from the setup card (supports `_{LOCATION}` suffix) |
+| `ARANET_API_KEY` | Aranet Cloud | Aranet Cloud workspace API key (supports `_{LOCATION}` suffix for separate workspaces) |
+| `ARANET_BACKFILL_MAX_DAYS` | Aranet Cloud | Days of history to backfill on first run / after gaps (0-7, default 7) |
 | `IAQUALINK_EMAIL` | iAqualink | iAqualink account email |
 | `IAQUALINK_PASSWORD` | iAqualink | iAqualink account password |
 
@@ -294,6 +297,9 @@ Define your locations and API configurations in `sites.json`. All integrations a
       "centri": {
         "device_id": "123a4b5c-678d-9e0f-a123-4b567c8d901e"
       },
+      "aranet": {
+        "base_ids": ["358151000000"]
+      },
       "iaqualink": {
         "serial_number": "your_pool_controller_serial",
         "device_name": "Pool Controller"
@@ -330,6 +336,8 @@ All API integrations are optional. Configure only the ones you have hardware/acc
 | `rachio.device_id` | Rachio sprinkler controller device ID |
 | `tankutility.device_id` | Tank Utility propane monitor device ID |
 | `centri.device_id` | Centri Connect (MyPropane) tank monitor device ID |
+| `aranet.base_ids` | Aranet base station IDs whose sensors belong to this site |
+| `aranet.sensor_ids` | Additional Aranet sensor IDs (cloud ID or device ID like `0A1B2`) for this site |
 | `iaqualink.serial_number` | iAqualink pool controller serial number |
 | `iaqualink.device_name` | iAqualink device name (alternative to serial_number) |
 | `span.panels` | Array of Span panel configs (host + name) |
@@ -890,6 +898,45 @@ readings for the same post.
 - Battery status (good/low/critical, estimated from battery voltage)
 - Battery/solar voltage, LTE signal, alert status (in `raw_data_*` columns)
 
+### Aranet Cloud API
+
+Aranet PRO sensors (Aranet4 PRO, Radon Plus PRO, ...) report through an Aranet PRO base station to
+[Aranet Cloud](https://aranet.cloud), which has a read-only REST API
+([Swagger docs](https://aranet.cloud/openapi)). One API key covers one workspace, which usually holds
+every location; each site picks its sensors by the base station they are paired with. Sensor names
+come from Aranet Cloud, so renaming a sensor there updates the dashboard.
+
+1. **Create an API key** in Aranet Cloud under **Settings > API** (requires the Integrations Write
+   permission).
+2. **Configure** in `.env`:
+   ```bash
+   ARANET_API_KEY=your_32_character_api_key
+   ```
+3. **Find base station IDs** (lists all base stations and sensors when the site has no `aranet`
+   section yet):
+   ```bash
+   make test-service SERVICE=aranet LOCATION=NY
+   ```
+4. **Add to sites.json** (`sensor_ids` is optional, for sensors not paired with a listed base):
+   ```json
+   "aranet": {
+     "base_ids": ["358151000000"]
+   }
+   ```
+
+**Polling**: Latest measurements and telemetry are fetched every cycle (sensors report every
+1-10 minutes); readings already stored are skipped. On the first run for a site, and whenever
+the newest stored measurement is more than 30 minutes old, history is backfilled (up to
+`ARANET_BACKFILL_MAX_DAYS`, max 7 days, which is all the API serves).
+
+**Data collected**:
+- `aranet_sensors`: sensor ID, device ID, name, type (e.g. Aranet4), base station, metrics
+- `aranet_readings`: one row per sensor, metric, and timestamp. `metric_key` is a stable key
+  (`co2`, `temperature`, `humidity`, `pressure`, `radon`, `battery`, `rssi`; other metrics use a
+  slug of their name). Values are normalized regardless of the units selected in Aranet Cloud:
+  temperature °F, pressure hPa, CO₂ ppm, humidity %, radon Bq/m³, battery %, signal dBm. The
+  original API reading is kept in `raw_data`.
+
 ### iAqualink API
 
 iAqualink monitors pool and spa equipment from Zodiac/Jandy pool controllers.
@@ -1176,6 +1223,8 @@ curl -X POST "http://localhost:8000/reports/generate?period=daily&send=true"
 | `sprinkler_runs` | Rachio sprinkler watering events |
 | `propane_readings` | Propane tank levels from Tank Utility and Centri Connect |
 | `pool_readings` | Pool/spa data from iAqualink |
+| `aranet_sensors` | Aranet sensor metadata (name, type, base station) |
+| `aranet_readings` | Aranet measurements and telemetry (CO₂, temperature, radon, battery, ...) |
 | `span_panel_tokens` | Span panel access tokens |
 | `span_panel_readings` | Panel-level power data (grid power, status) |
 | `span_circuit_readings` | Per-circuit power and energy data |
@@ -1337,6 +1386,7 @@ home-monitor/
 │   │   ├── rachio.py
 │   │   ├── tankutility.py
 │   │   ├── centri.py
+│   │   ├── aranet.py
 │   │   ├── iaqualink.py
 │   │   └── span.py
 │   ├── api.py              # REST API (FastAPI)

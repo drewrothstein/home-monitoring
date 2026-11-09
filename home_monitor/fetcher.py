@@ -3,10 +3,11 @@ Main data fetcher service that orchestrates data collection from all APIs.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import psutil
 
+from home_monitor.apis.aranet import AranetApiClient
 from home_monitor.apis.centri import CentriApiClient
 from home_monitor.apis.enphase import EnphaseApiClient
 from home_monitor.apis.flume import FlumeApiClient
@@ -17,6 +18,8 @@ from home_monitor.apis.tankutility import TankUtilityApiClient
 from home_monitor.apis.tempest import TempestApiClient
 from home_monitor.apis.tesla import TeslaApiClient
 from home_monitor.config import (
+    get_aranet_api_key,
+    get_aranet_backfill_max_days,
     get_centri_credentials,
     get_enphase_credentials,
     get_enphase_fetch_interval_cycles,
@@ -33,12 +36,14 @@ from home_monitor.database import (
     get_battery_bank,
     get_battery_banks_by_energy_site,
     get_enphase_gateway_token,
+    get_last_aranet_reading_time,
     get_last_span_circuit_reading_time,
     get_latest_propane_reading,
     get_propane_reading_exists,
     get_span_panel_token_by_host,
     get_sprinkler_run_exists,
     init_database,
+    insert_aranet_readings,
     insert_battery_reading,
     insert_enphase_local_reading,
     insert_fetch_run_summary,
@@ -54,6 +59,7 @@ from home_monitor.database import (
     insert_water_reading,
     prune_fetch_run_summaries,
     update_fetch_run_summary,
+    upsert_aranet_sensors,
     upsert_span_panel_token,
 )
 from home_monitor.site_config import (
@@ -984,6 +990,94 @@ def fetch_centri_data(site_name: str, site_config: dict, location_id: int):
         logger.error(f"[Centri] Error fetching data for {site_name}: {e}", exc_info=True)
 
 
+# Fetch history (instead of only latest readings) when the newest stored measurement is
+# older than this; Aranet sensors report every 1-10 minutes.
+ARANET_GAP_THRESHOLD = timedelta(minutes=30)
+
+
+def fetch_aranet_data(site_name: str, site_config: dict, location_id: int):
+    """
+    Fetch Aranet Cloud sensor data (Aranet4 PRO, Radon Plus PRO, ...) for a site.
+
+    Sensors are selected by the base stations in ``aranet.base_ids`` and/or the sensors in
+    ``aranet.sensor_ids``. Sensor metadata (names, types) is upserted every run. Latest
+    measurements and telemetry are stored each run; on the first run and after a gap,
+    history (up to ARANET_BACKFILL_MAX_DAYS, max 7) is fetched to fill in missing readings.
+    Readings already stored are skipped.
+
+    Args:
+        site_name: Site name (e.g., "NY", "FL")
+        site_config: Site configuration dictionary
+        location_id: Database location ID
+    """
+    try:
+        aranet_config = site_config.get("aranet")
+        if not aranet_config:
+            logger.debug(f"[Aranet] Not configured for site {site_name}")
+            return
+
+        api_key = get_aranet_api_key(site_name)
+        if not api_key:
+            logger.warning(
+                f"[Aranet] API key not found for site {site_name}. "
+                "Set ARANET_API_KEY in your .env file."
+            )
+            return
+
+        base_ids = [str(b) for b in aranet_config.get("base_ids") or []]
+        sensor_ids = [str(s) for s in aranet_config.get("sensor_ids") or []]
+        if not base_ids and not sensor_ids:
+            logger.warning(
+                f"[Aranet] No base_ids or sensor_ids configured for site {site_name}; "
+                "add them to the 'aranet' section in sites.json"
+            )
+            return
+
+        history_since = None
+        backfill_days = get_aranet_backfill_max_days()
+        if backfill_days > 0:
+            now = datetime.now(timezone.utc)
+            earliest = now - timedelta(days=backfill_days)
+            last = get_last_aranet_reading_time(location_id)
+            if last is None:
+                history_since = earliest
+            elif now - last > ARANET_GAP_THRESHOLD:
+                history_since = max(last, earliest)
+
+        if history_since is not None:
+            logger.info(
+                f"[Aranet] Fetching data for {site_name} with history since "
+                f"{history_since.isoformat()}"
+            )
+        else:
+            logger.info(f"[Aranet] Fetching data for {site_name}")
+
+        client = AranetApiClient(api_key=api_key)
+        data = client.fetch_site_data(
+            base_ids=base_ids, sensor_ids=sensor_ids, history_since=history_since
+        )
+
+        sensors = data["sensors"]
+        if not sensors:
+            logger.warning(
+                f"[Aranet] No sensors matched base_ids={base_ids} sensor_ids={sensor_ids} "
+                f"for site {site_name}"
+            )
+            return
+
+        upsert_aranet_sensors(location_id, sensors)
+        sensor_names = {s["sensor_id"]: s.get("name") for s in sensors}
+        inserted = insert_aranet_readings(location_id, data["readings"], sensor_names)
+
+        logger.info(
+            f"[Aranet] Successfully fetched data for {site_name} "
+            f"({len(sensors)} sensors, {len(data['readings'])} readings, {inserted} new)"
+        )
+
+    except Exception as e:
+        logger.error(f"[Aranet] Error fetching data for {site_name}: {e}", exc_info=True)
+
+
 def fetch_iaqualink_data(site_name: str, site_config: dict, location_id: int):
     """
     Fetch data from iAqualink API and store pool readings in database.
@@ -1360,6 +1454,8 @@ def fetch_all_data(cycle_count: int = 0, track_summary: bool = True):
                 integrations.append("TankUtility")
             if "centri" in site_config:
                 integrations.append("Centri")
+            if "aranet" in site_config:
+                integrations.append("Aranet")
             if "iaqualink" in site_config:
                 integrations.append("iAqualink")
             if "span" in site_config:
@@ -1434,6 +1530,10 @@ def fetch_all_data(cycle_count: int = 0, track_summary: bool = True):
             # Fetch Centri Connect (MyPropane) propane data (optional)
             if "centri" in site_config:
                 safe_fetch("centri", fetch_centri_data, site_name, site_config, location_id)
+
+            # Fetch Aranet Cloud air quality / radon data (optional)
+            if "aranet" in site_config:
+                safe_fetch("aranet", fetch_aranet_data, site_name, site_config, location_id)
 
             # Fetch iAqualink pool data (optional)
             if "iaqualink" in site_config:

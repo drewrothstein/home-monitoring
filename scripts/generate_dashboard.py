@@ -1045,6 +1045,56 @@ SELECT
 FROM daily_totals
 ORDER BY "time" """
 
+# =============================================================================
+# Aranet Cloud (indoor air quality / radon) SQL
+# =============================================================================
+
+# Sensor display name: current name from aranet_sensors, else name stored with the reading
+ARANET_SENSOR_NAME_SQL = "COALESCE(s.name, ar.sensor_name, ar.sensor_id)"
+
+
+def sql_aranet_timeseries(metric_key: str, label: str) -> str:
+    """Generate time-series SQL for one Aranet metric, one series per sensor."""
+    return f"""SELECT
+  ar.timestamp AS "time",
+  {ARANET_SENSOR_NAME_SQL} AS metric,
+  ar.value AS "{label}"
+FROM aranet_readings ar
+JOIN locations l ON ar.location_id = l.id
+LEFT JOIN aranet_sensors s ON s.sensor_id = ar.sensor_id
+WHERE ar.timestamp >= $__timeFrom() AND ar.timestamp <= $__timeTo()
+  AND ar.metric_key = '{metric_key}'
+  AND l.name IN ($location)
+ORDER BY ar.timestamp"""
+
+
+SQL_ARANET_CURRENT = """-- Latest value of each metric per Aranet sensor (readings from the last 7 days)
+WITH latest AS (
+  SELECT DISTINCT ON (ar.sensor_id, ar.metric_key)
+    ar.sensor_id, ar.sensor_name, ar.metric_key, ar.value, ar.timestamp
+  FROM aranet_readings ar
+  JOIN locations l ON ar.location_id = l.id
+  WHERE l.name IN ($location)
+    AND ar.timestamp >= NOW() - INTERVAL '7 days'
+  ORDER BY ar.sensor_id, ar.metric_key, ar.timestamp DESC
+)
+SELECT
+  COALESCE(s.name, MAX(latest.sensor_name), latest.sensor_id) AS "Sensor",
+  MAX(latest.value) FILTER (WHERE latest.metric_key = 'co2') AS "CO₂",
+  MAX(latest.value) FILTER (WHERE latest.metric_key = 'temperature') AS "Temperature",
+  MAX(latest.value) FILTER (WHERE latest.metric_key = 'humidity') AS "Humidity",
+  MAX(latest.value) FILTER (WHERE latest.metric_key = 'pressure') AS "Pressure",
+  MAX(latest.value) FILTER (WHERE latest.metric_key = 'radon') AS "Radon",
+  MAX(latest.value) FILTER (WHERE latest.metric_key = 'battery') AS "Battery",
+  MAX(latest.value) FILTER (WHERE latest.metric_key = 'rssi') AS "Signal",
+  MAX(latest.timestamp) FILTER (WHERE latest.metric_key NOT IN ('battery', 'rssi'))
+    AS "Last Reading"
+FROM latest
+LEFT JOIN aranet_sensors s ON s.sensor_id = latest.sensor_id
+GROUP BY s.name, latest.sensor_id
+ORDER BY 1"""
+
+
 SQL_SPAN_GRID_POWER = """SELECT
   spr.timestamp AS "time",
   COALESCE(spt.panel_name, spr.panel_serial) AS metric,
@@ -1743,6 +1793,162 @@ def color_override(pattern: str, color: str) -> dict:
 # =============================================================================
 # DASHBOARD PANELS
 # =============================================================================
+
+
+ARANET_SECTION_START_Y = 119
+ARANET_SECTION_END_Y = ARANET_SECTION_START_Y + 33
+
+
+def _table_color_override(field: str, unit: str, steps: list[dict[str, Any]]) -> dict:
+    """Table column override: unit, threshold steps, and colored text."""
+    return {
+        "matcher": {"id": "byName", "options": field},
+        "properties": [
+            {"id": "unit", "value": unit},
+            {"id": "decimals", "value": 0 if unit in ("ppm", "percent", "dBm") else 1},
+            {"id": "thresholds", "value": {"mode": "absolute", "steps": steps}},
+            {"id": "custom.cellOptions", "value": {"type": "color-text"}},
+        ],
+    }
+
+
+# Aranet4 CO2 bands (green < 1000 ppm, yellow < 1400 ppm, red above)
+ARANET_CO2_STEPS = [threshold(GREEN), threshold(YELLOW, 1000), threshold(RED, 1400)]
+# Radon: WHO reference level 100 Bq/m3, EPA action level 148 Bq/m3 (4 pCi/L)
+ARANET_RADON_STEPS = [threshold(GREEN), threshold(YELLOW, 100), threshold(RED, 148)]
+ARANET_BATTERY_STEPS = [threshold(RED), threshold(YELLOW, 15), threshold(GREEN, 30)]
+
+
+def aranet_timeseries(
+    title: str,
+    metric_key: str,
+    label: str,
+    unit: str,
+    pos: GridPos,
+    panel_id: int,
+    description: str,
+    steps: list[dict[str, Any]] | None = None,
+    decimals: int | None = None,
+) -> dict[str, Any]:
+    """Create a timeseries panel for one Aranet metric (one line per sensor)."""
+    panel = power_timeseries(
+        title=title,
+        sql=sql_aranet_timeseries(metric_key, label),
+        pos=pos,
+        panel_id=panel_id,
+        description=description,
+        legend_calcs=LEGEND_CALCS_STANDARD,
+        decimals=decimals,
+        custom_options={"fillOpacity": 0},
+    )
+    defaults = panel["fieldConfig"]["defaults"]
+    defaults["unit"] = unit
+    if steps:
+        defaults["thresholds"] = {"mode": "absolute", "steps": steps}
+        defaults["custom"]["thresholdsStyle"] = {"mode": "dashed"}
+    return panel
+
+
+def create_aranet_panels(start_y: int = ARANET_SECTION_START_Y) -> list[dict[str, Any]]:
+    """Create the Aranet indoor air quality section (row header, status table, charts)."""
+    y = start_y
+    panels: list[dict[str, Any]] = [
+        {
+            "id": 100,
+            "gridPos": {"h": 1, "w": 24, "x": 0, "y": y},
+            "type": "row",
+            "title": "Indoor Air Quality (Aranet)",
+            "collapsed": False,
+        },
+        {
+            "id": 101,
+            "gridPos": {"h": 8, "w": 24, "x": 0, "y": y + 1},
+            "type": "table",
+            "title": "Aranet Sensors (Latest)",
+            "description": (
+                "Latest reading per Aranet sensor. Temperature in °F, pressure in hPa, "
+                "radon in Bq/m³ (only for radon sensors). Battery and signal come from "
+                "sensor telemetry."
+            ),
+            "targets": [
+                {
+                    "datasource": DATASOURCE,
+                    "editorMode": "code",
+                    "format": "table",
+                    "rawQuery": True,
+                    "rawSql": SQL_ARANET_CURRENT,
+                    "refId": "A",
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "custom": {"align": "auto", "cellOptions": {"type": "auto"}},
+                    "mappings": [],
+                    "thresholds": {"mode": "absolute", "steps": [threshold(GREEN)]},
+                },
+                "overrides": [
+                    _table_color_override("CO₂", "ppm", ARANET_CO2_STEPS),
+                    _table_color_override("Temperature", "fahrenheit", [threshold(GREEN)]),
+                    _table_color_override("Humidity", "percent", [threshold(GREEN)]),
+                    _table_color_override("Pressure", "pressurehpa", [threshold(GREEN)]),
+                    _table_color_override("Radon", "Bq/m³", ARANET_RADON_STEPS),
+                    _table_color_override("Battery", "percent", ARANET_BATTERY_STEPS),
+                    _table_color_override("Signal", "dBm", [threshold(GREEN)]),
+                    {
+                        "matcher": {"id": "byName", "options": "Last Reading"},
+                        "properties": [{"id": "unit", "value": "dateTimeFromNow"}],
+                    },
+                ],
+            },
+            "options": {
+                "showHeader": True,
+                "cellHeight": "sm",
+                "footer": {"show": False},
+                "sortBy": [{"displayName": "Sensor", "desc": False}],
+            },
+        },
+    ]
+
+    charts = [
+        ("CO₂", "co2", "CO₂ (ppm)", "ppm", ARANET_CO2_STEPS, 0, "CO₂ concentration per sensor."),
+        ("Temperature", "temperature", "Temperature (°F)", "fahrenheit", None, 1, ""),
+        ("Humidity", "humidity", "Humidity (%)", "percent", None, 0, "Relative humidity."),
+        ("Atmospheric Pressure", "pressure", "Pressure (hPa)", "pressurehpa", None, 1, ""),
+        (
+            "Radon",
+            "radon",
+            "Radon (Bq/m³)",
+            "Bq/m³",
+            ARANET_RADON_STEPS,
+            0,
+            "Radon concentration (Radon Plus PRO). Dashed lines: WHO 100 Bq/m³, "
+            "EPA action level 148 Bq/m³ (4 pCi/L).",
+        ),
+        (
+            "Sensor Battery",
+            "battery",
+            "Battery (%)",
+            "percent",
+            ARANET_BATTERY_STEPS,
+            0,
+            "Battery level reported in Aranet sensor telemetry.",
+        ),
+    ]
+    for i, (title, key, label, unit, steps, decimals, description) in enumerate(charts):
+        panels.append(
+            aranet_timeseries(
+                title=f"Aranet {title}",
+                metric_key=key,
+                label=label,
+                unit=unit,
+                pos=GridPos(h=8, w=12, x=(i % 2) * 12, y=y + 9 + (i // 2) * 8),
+                panel_id=102 + i,
+                description=description or f"{title} per Aranet sensor.",
+                steps=steps,
+                decimals=decimals,
+            )
+        )
+    return panels
 
 
 def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> list[dict[str, Any]]:
@@ -3784,6 +3990,11 @@ def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> lis
     )
 
     # ==========================================================================
+    # Aranet Section (Row Header + Panels)
+    # ==========================================================================
+    panels.extend(create_aranet_panels(start_y=ARANET_SECTION_START_Y))
+
+    # ==========================================================================
     # Debug Section (Row Header + Panels)
     # ==========================================================================
 
@@ -3791,7 +4002,7 @@ def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> lis
     panels.append(
         {
             "id": 39,
-            "gridPos": {"h": 1, "w": 24, "x": 0, "y": 119},
+            "gridPos": {"h": 1, "w": 24, "x": 0, "y": ARANET_SECTION_END_Y},
             "type": "row",
             "title": "Debug",
             "collapsed": False,
@@ -3802,7 +4013,7 @@ def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> lis
     panels.append(
         {
             "id": 48,
-            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 120},
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": ARANET_SECTION_END_Y + 1},
             "type": "timeseries",
             "title": "API Calls by Integration",
             "description": "API calls per integration from fetch run summaries. Limited by retained run history (last 500 runs; dashboard time range applies).",
@@ -3860,7 +4071,7 @@ def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> lis
     panels.append(
         {
             "id": 49,
-            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 120},
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": ARANET_SECTION_END_Y + 1},
             "type": "timeseries",
             "title": "Water Gallons (Cumulative)",
             "description": "Cumulative water usage over the selected time range. Uses daily readings. Legend 'Last' = total gallons for the range.",
@@ -3946,6 +4157,7 @@ def create_dashboard() -> dict[str, Any]:
             "water",
             "irrigation",
             "propane",
+            "air-quality",
             "pool",
             "span",
             "system",
