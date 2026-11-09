@@ -4012,7 +4012,7 @@ def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> lis
     # API Calls by Integration
     panels.append(
         {
-            "id": 40,
+            "id": 48,
             "gridPos": {"h": 8, "w": 12, "x": 0, "y": ARANET_SECTION_END_Y + 1},
             "type": "timeseries",
             "title": "API Calls by Integration",
@@ -4070,7 +4070,7 @@ def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> lis
     # Water Gallons Cumulative (Debug) - total over selected time range
     panels.append(
         {
-            "id": 41,
+            "id": 49,
             "gridPos": {"h": 8, "w": 12, "x": 12, "y": ARANET_SECTION_END_Y + 1},
             "type": "timeseries",
             "title": "Water Gallons (Cumulative)",
