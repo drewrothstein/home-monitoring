@@ -683,7 +683,9 @@ deploy:  ## [remote] 🚀 Full deploy: sync files, rebuild, and restart everythi
 	@echo "📤 Step 1: Syncing config files..."
 	@$(MAKE) deploy-sync-remote
 	@echo ""
-	@echo "🔨 Step 2: Rebuilding and restarting infrastructure..."
+	@echo "🔨 Step 2: Rebuilding and restarting infrastructure (incl. dashboard generation)..."
+	$(REMOTE_COMPOSE) build dashboard-gen"
+	$(REMOTE_COMPOSE) up -d --force-recreate dashboard-gen"
 	$(REMOTE_COMPOSE) up -d postgres grafana"
 	@echo ""
 	@echo "🔨 Step 3: Rebuilding and restarting fetcher..."
