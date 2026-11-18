@@ -854,6 +854,14 @@ infra-logs-remote:  ## [remote] 📋 View logs from containers
 infra-ps-remote:  ## [remote] 📊 Show status of containers
 	$(REMOTE_COMPOSE) ps"
 
+config-reload-remote:  ## [remote] 🔁 Sync files, then restart fetcher/reporter/API so they pick up sites.json changes
+	@$(MAKE) deploy-sync-remote
+	@echo "🔁 Restarting services that bind-mount sites.json on $(DEPLOY_HOST)..."
+	@# sites.json is bind-mounted as a single file; rsync replaces it (new inode), so running
+	@# containers keep the old copy until restarted. Postgres and Grafana are left running.
+	ssh $(DEPLOY_HOST) "docker restart home-monitor-fetcher-scheduled home-monitor-reporter-scheduled home-monitor-api"
+	@echo "✅ Config reloaded"
+
 infra-restart-remote:  ## [remote] 🔄 Restart containers (no rebuild)
 	$(REMOTE_COMPOSE) restart"
 
