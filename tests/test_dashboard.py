@@ -15,6 +15,7 @@ from scripts.generate_dashboard import (
     sql_battery_soc,
     sql_current_production_consumption_export,
     sql_target,
+    sql_tesla_cumulative_import_export_timeseries,
     sql_tesla_exported_today_kwh,
     threshold,
 )
@@ -74,6 +75,28 @@ class TestSqlTeslaExportedToday:
         assert "'America/Chicago'" in sql
         assert "Exported Today (kWh)" in sql
         assert "$location" in sql
+
+
+class TestSqlTeslaCumulativeImportExport:
+    """Energy Import/Export by Site panel (Tesla power integrated per local day)."""
+
+    def test_sql_uses_tesla_power_and_timezone(self):
+        sql = sql_tesla_cumulative_import_export_timeseries("America/Chicago")
+        assert "source = 'tesla'" in sql
+        assert "power_imported" in sql and "power_exported" in sql
+        assert "'America/Chicago'" in sql
+        assert "$location" in sql
+        assert "Energy Imported" in sql and "Energy Exported" in sql
+        # Must not depend on Enphase meter telemetry columns (empty since Mar 2026)
+        assert "energy_imported_kwh" not in sql
+
+    def test_panel_uses_tesla_query(self):
+        panel = next(
+            p for p in create_panels("America/Chicago") if p["title"] == "Energy Import/Export by Site"
+        )
+        sql = panel["targets"][0]["rawSql"]
+        assert sql == sql_tesla_cumulative_import_export_timeseries("America/Chicago")
+        assert panel["fieldConfig"]["defaults"]["unit"] == "kWh"
 
 
 class TestSqlCurrentProductionConsumptionExport:
