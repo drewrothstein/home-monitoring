@@ -1,5 +1,7 @@
 # Home Monitor
 
+[![CI](https://github.com/drewrothstein/home-monitoring/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/drewrothstein/home-monitoring/actions/workflows/ci.yml)
+
 A multi-location home monitoring application that collects data from various APIs and stores it in a PostgreSQL database for visualization with Grafana. Track solar power, battery storage, weather conditions, and water usage across multiple properties.
 
 ## Table of Contents
