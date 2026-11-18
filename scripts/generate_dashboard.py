@@ -22,6 +22,7 @@ from home_monitor.metrics.power import (  # noqa: F401 — re-exported for tests
 )
 from home_monitor.metrics.power import sql_string_literal as _sql_string_literal
 from home_monitor.metrics.power import (  # noqa: F401 — re-exported for tests
+    sql_tesla_cumulative_import_export_timeseries,
     sql_tesla_exported_today_kwh,
 )
 
@@ -665,31 +666,6 @@ SQL_WATER_USAGE_STATS = """SELECT
       AND DATE_TRUNC('month', sr.start_time) = DATE_TRUNC('month', CURRENT_DATE)
   ), 0) AS "Sprinkler Days"
 """
-
-SQL_ENERGY_IMPORT_EXPORT = """SELECT
-  date_trunc('minute', pr.timestamp) AS "time",
-  l.name || ' (' || pr.source || ') - Energy Imported' AS metric,
-  SUM(pr.energy_imported_kwh) AS "Energy Imported (kWh)"
-FROM power_readings pr
-JOIN locations l ON pr.location_id = l.id
-WHERE pr.timestamp >= $__timeFrom() AND pr.timestamp <= $__timeTo()
-  AND pr.energy_imported_kwh IS NOT NULL
-  AND l.name IN ($location)
-  AND pr.source IN ($source)
-GROUP BY date_trunc('minute', pr.timestamp), l.name, pr.source
-UNION ALL
-SELECT
-  date_trunc('minute', pr.timestamp) AS "time",
-  l.name || ' (' || pr.source || ') - Energy Exported' AS metric,
-  SUM(pr.energy_exported_kwh) AS "Energy Exported (kWh)"
-FROM power_readings pr
-JOIN locations l ON pr.location_id = l.id
-WHERE pr.timestamp >= $__timeFrom() AND pr.timestamp <= $__timeTo()
-  AND pr.energy_exported_kwh IS NOT NULL
-  AND l.name IN ($location)
-  AND pr.source IN ($source)
-GROUP BY date_trunc('minute', pr.timestamp), l.name, pr.source
-ORDER BY "time" """
 
 # =============================================================================
 # Enphase Local Gateway Queries
@@ -2223,11 +2199,16 @@ def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> lis
     panels.append(
         power_timeseries(
             title="Energy Import/Export by Site",
-            sql=SQL_ENERGY_IMPORT_EXPORT,
+            sql=sql_tesla_cumulative_import_export_timeseries(all_day_timezone),
             pos=GridPos(h=8, w=12, x=12, y=24),
             panel_id=18,
-            description="Cumulative energy imported from grid (red) and exported to grid (green) in kWh. These are cumulative values from Enphase telemetry.",
-            legend_calcs=LEGEND_CALCS_WITH_SUM,
+            description=(
+                "Grid energy imported (red) and exported (green) so far each day, in kWh. "
+                "Integrated from Tesla grid power readings and reset at local midnight "
+                "(annotations `all_day_timezone`, default America/New_York). "
+                "Last value per day matches the Imported/Exported Today gauges."
+            ),
+            legend_calcs=["lastNotNull", "max"],
             custom_options={"lineInterpolation": "smooth", "fillOpacity": 20},
             overrides=[
                 color_override(".*Imported.*", RED),

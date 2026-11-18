@@ -572,6 +572,14 @@ db-restore-remote:  ## [remote] 📥 Restore database dump to remote host (run d
 	@echo ""
 	@echo "✅ Database restore complete"
 
+db-backup-remote:  ## [remote] 🛟 Full backup (all tables) of remote DB + config to ~/home-monitor-backups on the remote host
+	@echo "🛟 Backing up remote database and config on $(DEPLOY_HOST)..."
+	ssh $(DEPLOY_HOST) 'set -e; ts=$$(date +%Y%m%d-%H%M%S); dir=$$HOME/home-monitor-backups/$$ts; mkdir -p $$dir; \
+		docker exec home-monitor-db pg_dump -U home_monitor -d home_monitor -Fc > $$dir/home_monitor.dump; \
+		cd $(DEPLOY_CONFIG_PATH) && cp -p .env sites.json $$dir/ && (cp -p annotations.json $$dir/ 2>/dev/null || true); \
+		docker exec -i home-monitor-db pg_restore -l < $$dir/home_monitor.dump > /dev/null; \
+		echo "✅ Backup written to $$dir"; ls -lh $$dir'
+
 db-dump-remote:  ## [remote] 💾 Dump remote database to /tmp/home_monitor_remote_dump.sql (skips per-circuit data)
 	@echo "💾 Dumping remote database from $(DEPLOY_HOST) (excluding: $(DB_CLONE_EXCLUDE_TABLE_DATA))..."
 	ssh $(DEPLOY_HOST) "docker exec home-monitor-db pg_dump -U home_monitor -d home_monitor --no-owner --no-acl $(DB_CLONE_EXCLUDE_ARGS)" > $(REMOTE_DUMP_FILE)
@@ -777,6 +785,7 @@ deploy-sync-remote:  ## [remote] 📤 Sync project files to remote host for buil
 		--exclude 'assets' \
 		--exclude 'certs/*.crt' \
 		--exclude 'certs/*.key' \
+		--exclude 'reports/output' \
 		./ $(DEPLOY_HOST):$(DEPLOY_CONFIG_PATH)/
 	@echo ""
 	@echo "✅ Project sync complete"

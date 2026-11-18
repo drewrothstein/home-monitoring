@@ -123,6 +123,78 @@ SELECT
 """
 
 
+def sql_tesla_cumulative_import_export_timeseries(all_day_timezone: str) -> str:
+    """Grafana timeseries: Tesla grid import/export energy accumulated per local day (kWh).
+
+    Integrates power_imported / power_exported (W) with the trapezoidal rule (same method
+    as the "Imported/Exported Today" gauges) and resets at local midnight in
+    all_day_timezone. Readings are pulled from local midnight of the range start so the
+    first day's running total is correct; only points inside the Grafana range are returned.
+    """
+    tz_lit = sql_string_literal(all_day_timezone)
+    return f"""WITH minute_power AS (
+  SELECT
+    l.name AS site,
+    date_trunc('minute', pr.timestamp) AS ts_min,
+    SUM(COALESCE(pr.power_imported, 0::float8))::float8 AS import_w,
+    SUM(COALESCE(pr.power_exported, 0::float8))::float8 AS export_w
+  FROM power_readings pr
+  JOIN locations l ON pr.location_id = l.id
+  WHERE pr.source = 'tesla'
+    AND l.name IN ($location)
+    AND pr.timestamp >= (
+      date_trunc('day', $__timeFrom()::timestamptz AT TIME ZONE {tz_lit}) AT TIME ZONE {tz_lit}
+    )
+    AND pr.timestamp <= $__timeTo()
+  GROUP BY l.name, date_trunc('minute', pr.timestamp)
+),
+ordered AS (
+  SELECT
+    site,
+    ts_min,
+    import_w,
+    export_w,
+    date_trunc('day', ts_min::timestamptz AT TIME ZONE {tz_lit}) AS local_day,
+    LAG(ts_min) OVER w AS prev_ts,
+    LAG(import_w) OVER w AS prev_import_w,
+    LAG(export_w) OVER w AS prev_export_w
+  FROM minute_power
+  WINDOW w AS (
+    PARTITION BY site, date_trunc('day', ts_min::timestamptz AT TIME ZONE {tz_lit})
+    ORDER BY ts_min
+  )
+),
+segments AS (
+  SELECT
+    site,
+    ts_min,
+    local_day,
+    COALESCE(
+      EXTRACT(EPOCH FROM (ts_min - prev_ts)) * (import_w + prev_import_w) / 2.0 / 3600000.0, 0
+    ) AS import_kwh,
+    COALESCE(
+      EXTRACT(EPOCH FROM (ts_min - prev_ts)) * (export_w + prev_export_w) / 2.0 / 3600000.0, 0
+    ) AS export_kwh
+  FROM ordered
+),
+cumulative AS (
+  SELECT
+    site,
+    ts_min,
+    SUM(import_kwh) OVER (PARTITION BY site, local_day ORDER BY ts_min) AS imported_kwh,
+    SUM(export_kwh) OVER (PARTITION BY site, local_day ORDER BY ts_min) AS exported_kwh
+  FROM segments
+)
+SELECT ts_min AS "time", site || ' - Energy Imported' AS metric, imported_kwh AS "kWh"
+FROM cumulative
+WHERE ts_min >= $__timeFrom()
+UNION ALL
+SELECT ts_min AS "time", site || ' - Energy Exported' AS metric, exported_kwh AS "kWh"
+FROM cumulative
+WHERE ts_min >= $__timeFrom()
+ORDER BY "time" """
+
+
 def sql_current_production_consumption_export(all_day_timezone: str) -> str:
     """Latest production/consumption plus Tesla import/export today (kWh); ignores Grafana range."""
     tz_lit = sql_string_literal(all_day_timezone)
