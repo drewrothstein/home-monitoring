@@ -59,6 +59,9 @@ services:
     build: .
     container_name: home-monitor-dashboard-gen
     volumes:
+      # Run the synced project (scripts, home_monitor, annotations.json) rather than the
+      # code baked into the image, so the dashboard always matches what was deployed.
+      - .:/app:ro
       - ./grafana/provisioning/dashboards:/app/grafana/provisioning/dashboards
     environment:
       PYTHONPATH: /app
