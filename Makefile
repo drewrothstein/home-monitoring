@@ -612,6 +612,14 @@ deploy-clean-remote:  ## [remote] 🧹 Remove Docker context for remote deployme
 		echo "✅ Removed context '$(DEPLOY_CONTEXT)'" || \
 		echo "⚠️  Context '$(DEPLOY_CONTEXT)' does not exist"
 
+deploy-prune-remote:  ## [remote] 🧽 Remove Docker images not used by any container + build cache older than 7 days (volumes untouched)
+	@echo "🧽 Pruning unused Docker images and old build cache on $(DEPLOY_HOST)..."
+	@ssh $(DEPLOY_HOST) "docker system df && echo && \
+		docker image prune -a -f && \
+		docker builder prune -f --filter until=168h && \
+		echo && docker system df"
+	@echo "✅ Prune complete (volumes and in-use images were not touched)"
+
 deploy-disable-https-remote:  ## [remote] 🔓 Disable HTTPS on Grafana and API (switch back to HTTP)
 	@echo "🔓 Disabling HTTPS on remote services..."
 	@sed -i '' 's/^GF_SERVER_PROTOCOL=.*/GF_SERVER_PROTOCOL=http/' .env 2>/dev/null || true
