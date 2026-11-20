@@ -62,6 +62,18 @@ clean:  ## [local] 🧹 Clean up Python cache files
 	find . -type f -name "*.pyd" -delete
 	find . -type d -name "*.egg-info" -exec rm -r {} + 2>/dev/null || true
 
+db-dedupe-propane-local:  ## [local] 🧹 Report duplicate propane_readings rows locally; CONFIRM=yes deletes them
+	@echo "🧹 Duplicate propane_readings in local database (same location_id, device_id, timestamp):"
+	docker exec -i home-monitor-db psql -U home_monitor -d home_monitor -v ON_ERROR_STOP=1 < scripts/sql/propane_duplicates_report.sql
+	@if [ "$(CONFIRM)" = "yes" ]; then \
+		echo "🗑️  Deleting duplicates (keeping lowest id per reading)..."; \
+		docker exec -i home-monitor-db psql -U home_monitor -d home_monitor -v ON_ERROR_STOP=1 < scripts/sql/propane_duplicates_delete.sql; \
+		docker exec -i home-monitor-db psql -U home_monitor -d home_monitor < scripts/sql/propane_duplicates_report.sql; \
+		echo "✅ Duplicates removed"; \
+	else \
+		echo "ℹ️  Dry run only. To delete: make db-dedupe-propane-local CONFIRM=yes"; \
+	fi
+
 db-dump:  ## [local] 💾 Dump database to /tmp/home_monitor_dump.sql
 	@echo "💾 Dumping local database..."
 	docker exec home-monitor-db pg_dump -U home_monitor -d home_monitor --no-owner --no-acl > /tmp/home_monitor_dump.sql
@@ -579,6 +591,18 @@ db-backup-remote:  ## [remote] 🛟 Full backup (all tables) of remote DB + conf
 		cd $(DEPLOY_CONFIG_PATH) && cp -p .env sites.json $$dir/ && (cp -p annotations.json $$dir/ 2>/dev/null || true); \
 		docker exec -i home-monitor-db pg_restore -l < $$dir/home_monitor.dump > /dev/null; \
 		echo "✅ Backup written to $$dir"; ls -lh $$dir'
+
+db-dedupe-propane-remote:  ## [remote] 🧹 Report duplicate propane_readings rows on remote; CONFIRM=yes deletes them (run db-backup-remote first)
+	@echo "🧹 Duplicate propane_readings on $(DEPLOY_HOST) (same location_id, device_id, timestamp):"
+	ssh $(DEPLOY_HOST) "docker exec -i home-monitor-db psql -U home_monitor -d home_monitor -v ON_ERROR_STOP=1" < scripts/sql/propane_duplicates_report.sql
+	@if [ "$(CONFIRM)" = "yes" ]; then \
+		echo "🗑️  Deleting duplicates (keeping lowest id per reading)..."; \
+		ssh $(DEPLOY_HOST) "docker exec -i home-monitor-db psql -U home_monitor -d home_monitor -v ON_ERROR_STOP=1" < scripts/sql/propane_duplicates_delete.sql; \
+		ssh $(DEPLOY_HOST) "docker exec -i home-monitor-db psql -U home_monitor -d home_monitor" < scripts/sql/propane_duplicates_report.sql; \
+		echo "✅ Duplicates removed"; \
+	else \
+		echo "ℹ️  Dry run only. Back up first (make db-backup-remote), then: make db-dedupe-propane-remote CONFIRM=yes"; \
+	fi
 
 db-dump-remote:  ## [remote] 💾 Dump remote database to /tmp/home_monitor_remote_dump.sql (skips per-circuit data)
 	@echo "💾 Dumping remote database from $(DEPLOY_HOST) (excluding: $(DB_CLONE_EXCLUDE_TABLE_DATA))..."
