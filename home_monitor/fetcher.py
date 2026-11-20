@@ -830,6 +830,10 @@ def fetch_tankutility_data(site_name: str, site_config: dict, location_id: int):
     """
     Fetch data from Tank Utility API and store propane tank readings in database.
 
+    The device only reports a few times per day while the fetcher runs every few
+    minutes, so a reading already stored for the same device timestamp is not
+    inserted again.
+
     Args:
         site_name: Site name (e.g., "NY", "FL")
         site_config: Site configuration dictionary
@@ -864,33 +868,43 @@ def fetch_tankutility_data(site_name: str, site_config: dict, location_id: int):
 
         data = client.fetch_current_data(device_id=device_id)
 
-        # Store propane reading
-        if data.get("tank_level_percent") is not None:
-            insert_propane_reading(
-                location_id=location_id,
-                device_id=device_id,
-                timestamp=data["timestamp"],
-                tank_level_percent=data.get("tank_level_percent"),
-                tank_level_gallons=data.get("tank_level_gallons"),
-                capacity_gallons=data.get("capacity_gallons"),
-                temperature_f=data.get("temperature_f"),
-                battery_status=data.get("battery_status"),
-                battery_warn=data.get("battery_warn"),
-                battery_crit=data.get("battery_crit"),
-                fuel_type=data.get("fuel_type"),
-                source="tankutility",
-                raw_data=data.get("raw_data"),
-            )
-            logger.info(
-                f"[TankUtility] Successfully fetched data for {site_name} "
-                f"(level={data.get('tank_level_percent'):.1f}%, "
-                f"gallons={data.get('tank_level_gallons'):.0f}/{data.get('capacity_gallons'):.0f})"
-            )
-        else:
+        if data.get("tank_level_percent") is None:
             logger.warning(
                 f"[TankUtility] No tank level data returned for {site_name}. "
-                f"Raw data keys: {list(data.get('raw_data', {}).keys()) if data.get('raw_data') else 'None'}"
+                f"Raw data keys: {list((data.get('raw_data') or {}).keys())}"
             )
+            return
+
+        # The device only reports a few times per day; skip readings already stored
+        if get_propane_reading_exists(location_id, device_id, data["timestamp"]):
+            logger.info(
+                f"[TankUtility] Reading at {data['timestamp']} already stored for {site_name}; "
+                "device has not reported new data yet"
+            )
+            return
+
+        insert_propane_reading(
+            location_id=location_id,
+            device_id=device_id,
+            timestamp=data["timestamp"],
+            tank_level_percent=data.get("tank_level_percent"),
+            tank_level_gallons=data.get("tank_level_gallons"),
+            capacity_gallons=data.get("capacity_gallons"),
+            temperature_f=data.get("temperature_f"),
+            battery_status=data.get("battery_status"),
+            battery_warn=data.get("battery_warn"),
+            battery_crit=data.get("battery_crit"),
+            fuel_type=data.get("fuel_type"),
+            source="tankutility",
+            raw_data=data.get("raw_data"),
+        )
+        gallons = data.get("tank_level_gallons")
+        capacity = data.get("capacity_gallons")
+        gallons_str = f"{gallons:.0f}/{capacity:.0f}" if gallons is not None and capacity else "n/a"
+        logger.info(
+            f"[TankUtility] Successfully fetched data for {site_name} "
+            f"(level={data['tank_level_percent']:.1f}%, gallons={gallons_str})"
+        )
 
     except Exception as e:
         logger.error(f"[TankUtility] Error fetching data for {site_name}: {e}", exc_info=True)
