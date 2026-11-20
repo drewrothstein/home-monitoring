@@ -533,19 +533,27 @@ WHERE pr.timestamp >= $__timeFrom() AND pr.timestamp <= $__timeTo()
 ORDER BY pr.timestamp"""
 
 
-SQL_CURRENT_PROPANE_LEVEL = """SELECT
-  COALESCE(pr.tank_level_percent, 0) AS "Tank Level (%)",
-  COALESCE(pr.tank_level_gallons, 0) AS "Gallons",
-  COALESCE(pr.capacity_gallons, 500) AS "Capacity"
-FROM propane_readings pr
-JOIN locations l ON pr.location_id = l.id
-WHERE l.name IN ($location)
-  AND pr.timestamp = (
-    SELECT MAX(pr2.timestamp)
-    FROM propane_readings pr2
-    WHERE pr2.location_id = pr.location_id
-  )
-LIMIT 1"""
+SQL_CURRENT_PROPANE_LEVEL = """-- Latest reading per tank (one row per site + device); readings may repeat per timestamp
+WITH latest AS (
+  SELECT DISTINCT ON (pr.location_id, pr.device_id)
+    l.name AS site,
+    pr.source,
+    pr.tank_level_percent,
+    pr.tank_level_gallons,
+    pr.capacity_gallons
+  FROM propane_readings pr
+  JOIN locations l ON pr.location_id = l.id
+  WHERE l.name IN ($location)
+  ORDER BY pr.location_id, pr.device_id, pr.timestamp DESC
+)
+SELECT
+  CASE WHEN COUNT(*) OVER (PARTITION BY site) > 1 THEN site || ' - ' || source ELSE site END
+    AS "Tank",
+  COALESCE(tank_level_percent, 0) AS "Tank Level (%)",
+  COALESCE(tank_level_gallons, 0) AS "Gallons",
+  COALESCE(capacity_gallons, 500) AS "Capacity"
+FROM latest
+ORDER BY "Tank" """
 
 SQL_PROPANE_LEVEL_TIMESERIES = """SELECT * FROM (
   -- Historical data points
@@ -3173,6 +3181,7 @@ def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> lis
                         ],
                     },
                     "unit": "percent",
+                    "displayName": "${__data.fields.Tank}",
                 },
                 "overrides": [
                     {
@@ -3199,8 +3208,9 @@ def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> lis
                 "minVizHeight": 75,
                 "minVizWidth": 75,
                 "orientation": "auto",
+                # One gauge per row (tank), labelled by the query's "Tank" column
                 "reduceOptions": {
-                    "values": False,
+                    "values": True,
                     "calcs": ["lastNotNull"],
                     "fields": "/^Tank Level \\(%\\)$/",
                 },
@@ -3231,9 +3241,11 @@ def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> lis
             unit="gal",
             min_val=0,
             max_val=None,
-            color_mode="value",
+            # Tanks differ in size (e.g. 120 vs 500 gal), so gallon thresholds would mislead;
+            # the Tank Level gauge carries the color-coded fill percentage instead.
+            color_mode="none",
             graph_mode="none",
-            description="Current propane tank level in gallons",
+            description="Current propane per tank in gallons (one value per site/tank)",
             overrides=[
                 {
                     "matcher": {"id": "byName", "options": "Tank Level (%)"},
@@ -3256,6 +3268,13 @@ def create_panels(all_day_timezone: str = DEFAULT_ANNOTATIONS_ALL_DAY_TZ) -> lis
             ],
         )
     )
+    # One value per row (tank), labelled by the query's "Tank" column
+    panels[-1]["options"]["reduceOptions"] = {
+        "values": True,
+        "calcs": ["lastNotNull"],
+        "fields": "/^Gallons$/",
+    }
+    panels[-1]["fieldConfig"]["defaults"]["displayName"] = "${__data.fields.Tank}"
 
     # Propane Tank Level Timeseries
     panels.append(

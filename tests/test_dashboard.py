@@ -99,6 +99,26 @@ class TestSqlTeslaCumulativeImportExport:
         assert panel["fieldConfig"]["defaults"]["unit"] == "kWh"
 
 
+class TestPropaneMultiTank:
+    """Propane gauge/stat show one value per tank across sites."""
+
+    def test_current_propane_sql_returns_one_row_per_tank(self):
+        from scripts.generate_dashboard import SQL_CURRENT_PROPANE_LEVEL as sql
+
+        assert "LIMIT 1" not in sql
+        assert "DISTINCT ON (pr.location_id, pr.device_id)" in sql
+        assert 'AS "Tank"' in sql
+        assert "$location" in sql
+
+    def test_propane_panels_show_each_tank(self):
+        panels = {p["id"]: p for p in create_panels()}
+        for panel_id, field in ((21, "Tank Level"), (22, "Gallons")):
+            panel = panels[panel_id]
+            assert panel["options"]["reduceOptions"]["values"] is True
+            assert field in panel["options"]["reduceOptions"]["fields"]
+            assert panel["fieldConfig"]["defaults"]["displayName"] == "${__data.fields.Tank}"
+
+
 class TestSqlCurrentProductionConsumptionExport:
     """Merged top-row gauge query (production, consumption, Tesla export today)."""
 
